@@ -1,0 +1,20 @@
+[project]
+name = "hackaton-system"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.13.2",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9.0.80",
+    "pandas>=2.2",
+    "plotly>=5.24",
+    "pydantic>=2.9",
+    "python-dotenv>=1.0",
+    "sqlalchemy>=2.0",
+    "streamlit>=1.39",
+    "supervision>=0.21",
+    "typer>=0.12",
+    "ultralytics>=8.3",
+]
