@@ -12,9 +12,10 @@ from hackaton_system.db import Activity, Detection, Person, Video, engine, init_
 
 @dataclass(slots=True)
 class DashboardData:
-    activities: pd.DataFrame
     headcount: pd.DataFrame
-    person_matrix: pd.DataFrame
+    activity_summary: pd.DataFrame
+    role_activity_matrix: pd.DataFrame
+    person_episodes: pd.DataFrame
 
 
 def list_available_videos() -> pd.DataFrame:
@@ -40,35 +41,18 @@ def list_available_videos() -> pd.DataFrame:
 def load_dashboard_data(video_id: Optional[int]) -> DashboardData:
     """Собирает набор датафреймов для отрисовки панели."""
 
-    init_db()
-    activities = _load_activity_df(video_id)
-    headcount = _load_headcount_df(video_id)
-    person_matrix = _load_person_activity_matrix(video_id)
-    return DashboardData(activities=activities, headcount=headcount, person_matrix=person_matrix)
-
-
-def _load_activity_df(video_id: Optional[int]) -> pd.DataFrame:
-    if video_id is None:
-        return _placeholder_activity_df()
-    stmt = (
-        select(
-            Activity.id.label("activity_id"),
-            Activity.activity_class,
-            Activity.t_start_sec,
-            Activity.t_end_sec,
-            Activity.activity_conf,
-            Person.person_type,
-            Person.track_id,
-        )
-        .join(Person, Activity.person_id == Person.id)
-        .where(Activity.video_id == video_id)
-        .order_by(Activity.t_start_sec)
+    return DashboardData(
+        headcount=load_headcount(video_id),
+        activity_summary=load_activity_summary(video_id),
+        role_activity_matrix=load_role_activity_matrix(video_id),
+        person_episodes=load_person_episodes(video_id),
     )
-    df = _load_dataframe(stmt)
-    return df if not df.empty else _placeholder_activity_df()
 
 
-def _load_headcount_df(video_id: Optional[int]) -> pd.DataFrame:
+def load_headcount(video_id: Optional[int]) -> pd.DataFrame:
+    """Возвращает количество людей по кадрам."""
+
+    init_db()
     if video_id is None:
         return _placeholder_headcount_df()
     stmt = (
@@ -85,57 +69,105 @@ def _load_headcount_df(video_id: Optional[int]) -> pd.DataFrame:
         df_any.groupby("time_sec")["person_id"]
         .nunique()
         .reset_index()
-        .rename(columns={"person_id": "count"}),
+        .rename(columns={"person_id": "headcount"}),
     )
     return headcount
 
 
-def _load_person_activity_matrix(video_id: Optional[int]) -> pd.DataFrame:
+def load_activity_summary(video_id: Optional[int]) -> pd.DataFrame:
+    """Суммарное время по активностям, минуты."""
+
+    init_db()
+    if video_id is None:
+        return _placeholder_activity_summary_df()
+    stmt = (
+        select(
+            Activity.activity_class,
+            (Activity.t_end_sec - Activity.t_start_sec).label("duration_sec"),
+        )
+        .where(Activity.video_id == video_id)
+    )
+    df = _load_dataframe(stmt)
+    if df.empty:
+        return _placeholder_activity_summary_df()
+    df_any = cast(Any, df)
+    summary = cast(
+        pd.DataFrame,
+        df_any.groupby("activity_class")["duration_sec"].sum().reset_index(),
+    )
+    summary["duration_min"] = summary["duration_sec"] / 60.0
+    return summary.sort_values("duration_min", ascending=False).reset_index(drop=True)
+
+
+def load_role_activity_matrix(video_id: Optional[int]) -> pd.DataFrame:
+    """Матрица время(минуты) по person_type × activity."""
+
+    init_db()
     if video_id is None:
         return _placeholder_matrix_df()
     stmt = (
         select(
             Person.person_type,
             Activity.activity_class,
-            (Activity.t_end_sec - Activity.t_start_sec).label("duration"),
+            (Activity.t_end_sec - Activity.t_start_sec).label("duration_sec"),
         )
-        .join(Activity, Activity.person_id == Person.id)
+        .join(Person, Activity.person_id == Person.id)
         .where(Activity.video_id == video_id)
     )
     df = _load_dataframe(stmt)
     if df.empty:
         return _placeholder_matrix_df()
     df_any = cast(Any, df)
+    df_any["duration_min"] = df_any["duration_sec"] / 60.0
     pivot = cast(
         pd.DataFrame,
         df_any.pivot_table(
             index="person_type",
             columns="activity_class",
-            values="duration",
+            values="duration_min",
             aggfunc="sum",
             fill_value=0,
         ).reset_index(),
     )
+    pivot = pivot.sort_values("person_type").reset_index(drop=True)
     return pivot
+
+
+def load_person_episodes(video_id: Optional[int]) -> pd.DataFrame:
+    """Детальные эпизоды по людям."""
+
+    init_db()
+    if video_id is None:
+        return _placeholder_episodes_df()
+    stmt = (
+        select(
+            Activity.person_id,
+            Person.person_type,
+            Activity.activity_class,
+            Activity.t_start_sec,
+            Activity.t_end_sec,
+            (Activity.t_end_sec - Activity.t_start_sec).label("duration_sec"),
+        )
+        .join(Person, Activity.person_id == Person.id)
+        .where(Activity.video_id == video_id)
+        .order_by(Activity.t_start_sec)
+    )
+    df = _load_dataframe(stmt)
+    return df if not df.empty else _placeholder_episodes_df()
 
 
 def _load_dataframe(statement: Select[Any]) -> pd.DataFrame:
     return cast(pd.DataFrame, pd.read_sql(statement, engine))
 
 
-def _placeholder_activity_df() -> pd.DataFrame:
-    classes = ["walking", "monitoring", "repairing", "idle"]
-    starts = np.arange(0, len(classes) * 60, 60)
-    ends = starts + 55
-    person_types = ["mechanic", "inspector", "welder", "operator"]
+def _placeholder_activity_summary_df() -> pd.DataFrame:
+    classes = ["working", "idle_at_station", "walking", "standing", "in_restricted_zone"]
+    mins = np.array([18, 7, 5, 3, 1], dtype=float)
     return pd.DataFrame(
         {
             "activity_class": classes,
-            "t_start_sec": starts,
-            "t_end_sec": ends,
-            "activity_conf": np.linspace(0.6, 0.9, len(classes)),
-            "person_type": person_types,
-            "track_id": np.arange(1, len(classes) + 1),
+            "duration_sec": mins * 60,
+            "duration_min": mins,
         }
     )
 
@@ -143,15 +175,31 @@ def _placeholder_activity_df() -> pd.DataFrame:
 def _placeholder_headcount_df() -> pd.DataFrame:
     seconds = np.arange(0, 300, 15)
     counts = 2 + (np.sin(seconds / 60) > 0).astype(int)
-    return pd.DataFrame({"time_sec": seconds, "count": counts})
+    return pd.DataFrame({"time_sec": seconds, "headcount": counts})
 
 
 def _placeholder_matrix_df() -> pd.DataFrame:
-    data: Dict[str, list[int] | list[str]] = {
-        "person_type": ["mechanic", "inspector", "welder"],
-        "walking": [10, 5, 2],
-        "repairing": [30, 5, 40],
-        "monitoring": [5, 25, 0],
-        "idle": [5, 5, 5],
+    data: Dict[str, list[float] | list[str]] = {
+        "person_type": ["operator", "supervisor", "visitor"],
+        "working": [18.0, 1.0, 0.0],
+        "idle_at_station": [6.5, 0.5, 0.0],
+        "walking": [2.0, 6.0, 4.0],
+        "standing": [0.5, 4.0, 3.0],
+        "in_restricted_zone": [0.0, 0.0, 1.5],
     }
     return pd.DataFrame(data)
+
+
+def _placeholder_episodes_df() -> pd.DataFrame:
+    starts = np.arange(0, 240, 60, dtype=float)
+    ends = starts + 50
+    return pd.DataFrame(
+        {
+            "person_id": [1, 1, 2, 3],
+            "person_type": ["operator", "operator", "supervisor", "visitor"],
+            "activity_class": ["working", "idle_at_station", "walking", "in_restricted_zone"],
+            "t_start_sec": starts[:4],
+            "t_end_sec": ends[:4],
+            "duration_sec": ends[:4] - starts[:4],
+        }
+    )

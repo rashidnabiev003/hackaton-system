@@ -1,0 +1,28 @@
+services:
+  dashboard:
+    build: .
+    command:
+      [
+        "uv",
+        "run",
+        "streamlit",
+        "run",
+        "hackaton_system/dashboard/app.py",
+        "--server.port=8501",
+        "--server.address=0.0.0.0",
+      ]
+    ports:
+      - "8501:8501"
+    environment:
+      - HACKATON_DATABASE_URL=sqlite:///data/hackaton.db
+    volumes:
+      - ./data:/app/data
+
+  processor:
+    build: .
+    command: ["tail", "-f", "/dev/null"]
+    environment:
+      - HACKATON_DATABASE_URL=sqlite:///data/hackaton.db
+    volumes:
+      - ./data:/app/data
+

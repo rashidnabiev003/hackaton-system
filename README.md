@@ -115,4 +115,25 @@ activities(id, video_id, person_id, activity_class, t_start_sec, t_end_sec, acti
 
 ---
 
-Готовы расширить план под конкретный датасет, GPU и дедлайн: просто уточните вводные.
+## 9. Docker / Compose
+
+Быстрый старт без локальной установки Python:
+
+1. Собрать образ и запустить дашборд:
+
+   ```bash
+   docker compose up dashboard
+   ```
+
+   Приложение будет доступно на `http://127.0.0.1:8501`.
+
+2. Все данные (SQLite, артефакты) сохраняются в `./data`, которая проброшена в контейнер.
+
+3. Выполнить пайплайн/CLI-команды внутри контейнера можно через сервис `processor`, например:
+
+   ```bash
+   docker compose run --rm processor uv run python main.py seed-demo --force
+   docker compose run --rm processor uv run python main.py process-video data/factory.mp4
+   ```
+
+Сборка использует `uv` для установки зависимостей, а системные библиотеки (`ffmpeg`, `libgl1`) уже включены, чтобы Ultralytics и OpenCV работали «из коробки».
