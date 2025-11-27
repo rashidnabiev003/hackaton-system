@@ -13,6 +13,7 @@ app = typer.Typer(help="Hackathon video analytics toolkit")
 def setup_database() -> None:
     """Create database tables."""
 
+    # Создаём таблицы и директории; вызывается один раз при развёртывании.
     init_db()
     typer.echo("Database initialized.")
 
@@ -21,6 +22,7 @@ def setup_database() -> None:
 def process_video(video_path: Path = typer.Argument(..., exists=True, readable=True)) -> None:
     """Run the processing pipeline for a video file."""
 
+    # Лениво создаём экземпляр пайплайна (внутри инициализируется БД и загрузчик YOLO).
     processor = VideoProcessor()
     video_id = processor.process_video(video_path)
     typer.echo(f"Video stored with id={video_id}")
@@ -30,6 +32,7 @@ def process_video(video_path: Path = typer.Argument(..., exists=True, readable=T
 def seed_demo(force: bool = typer.Option(False, "--force", help="Override existing data")) -> None:
     """Populate the database with deterministic demo rows."""
 
+    # Загружаем предопределённые данные, чтобы интерфейс Streamlit сразу что-то показывал.
     rows = seed_demo_data(force=force)
     if rows:
         typer.echo(f"Inserted {rows} demo rows.")
