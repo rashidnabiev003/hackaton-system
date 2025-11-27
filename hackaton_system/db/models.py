@@ -6,6 +6,12 @@ from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
+def _utcnow() -> datetime:
+    """Return timezone-aware UTC timestamp for SQL defaults."""
+
+    return datetime.now(UTC)
+
+
 class Base(DeclarativeBase):
     """Declarative base for SQLAlchemy models."""
 
@@ -82,7 +88,3 @@ class Activity(Base):
 
     video: Mapped["Video"] = relationship("Video", back_populates="activities")
     person: Mapped["Person"] = relationship("Person", back_populates="activities")
-def _utcnow() -> datetime:
-    """Return timezone-aware UTC timestamp for SQL defaults."""
-
-    return datetime.now(UTC)

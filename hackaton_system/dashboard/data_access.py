@@ -1,25 +1,29 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
+from pandas import DataFrame
 from sqlalchemy import Select, select
 
-from hackaton_system.db import Activity, Detection, Person, Video, engine, init_db
+from hackaton_system.db.models import Activity, Detection, Person, Video
+from hackaton_system.db.session import get_session, init_db
 
 
 @dataclass(slots=True)
 class DashboardData:
-    activities: pd.DataFrame
-    headcount: pd.DataFrame
-    person_matrix: pd.DataFrame
+    activities: DataFrame
+    headcount: DataFrame
+    person_matrix: DataFrame
 
 
-def list_available_videos() -> pd.DataFrame:
+def list_available_videos() -> DataFrame:
     """Возвращает список обработанных видео или заглушку."""
 
+    # Инициализируем БД на случай запуска сервиса «с нуля».
     init_db()
     stmt = select(Video.id, Video.filename, Video.duration_sec, Video.fps).order_by(Video.id)
     df = _load_dataframe(stmt)
@@ -40,6 +44,7 @@ def list_available_videos() -> pd.DataFrame:
 def load_dashboard_data(video_id: Optional[int]) -> DashboardData:
     """Собирает набор датафреймов для отрисовки панели."""
 
+    # Гарантируем актуальную схему БД и собираем все срезы отчётности.
     init_db()
     activities = _load_activity_df(video_id)
     headcount = _load_headcount_df(video_id)
@@ -47,7 +52,7 @@ def load_dashboard_data(video_id: Optional[int]) -> DashboardData:
     return DashboardData(activities=activities, headcount=headcount, person_matrix=person_matrix)
 
 
-def _load_activity_df(video_id: Optional[int]) -> pd.DataFrame:
+def _load_activity_df(video_id: Optional[int]) -> DataFrame:
     if video_id is None:
         return _placeholder_activity_df()
     stmt = (
@@ -64,11 +69,11 @@ def _load_activity_df(video_id: Optional[int]) -> pd.DataFrame:
         .where(Activity.video_id == video_id)
         .order_by(Activity.t_start_sec)
     )
-    df = _load_dataframe(stmt)
+    df: DataFrame = _load_dataframe(stmt)
     return df if not df.empty else _placeholder_activity_df()
 
 
-def _load_headcount_df(video_id: Optional[int]) -> pd.DataFrame:
+def _load_headcount_df(video_id: Optional[int]) -> DataFrame:
     if video_id is None:
         return _placeholder_headcount_df()
     stmt = (
@@ -76,21 +81,23 @@ def _load_headcount_df(video_id: Optional[int]) -> pd.DataFrame:
         .where(Detection.video_id == video_id)
         .order_by(Detection.time_sec)
     )
-    df = _load_dataframe(stmt)
-    if df.empty:
+    rows = _fetch_rows(stmt)
+    if not rows:
         return _placeholder_headcount_df()
-    df_any = cast(Any, df)
-    headcount = cast(
-        pd.DataFrame,
-        df_any.groupby("time_sec")["person_id"]
-        .nunique()
-        .reset_index()
-        .rename(columns={"person_id": "count"}),
-    )
-    return headcount
+    # Считаем уникальные track_id внутри каждого момента времени.
+    counts: Dict[float, set[int]] = defaultdict(set)
+    for row in rows:
+        counts[float(row["time_sec"])].add(int(row["person_id"]))
+    times = sorted(counts.keys())
+    # Преобразуем интервальные множества в плоскую таблицу для построения графика.
+    data: Dict[str, list[float] | list[int]] = {
+        "time_sec": times,
+        "count": [len(counts[time_sec]) for time_sec in times],
+    }
+    return pd.DataFrame(data)
 
 
-def _load_person_activity_matrix(video_id: Optional[int]) -> pd.DataFrame:
+def _load_person_activity_matrix(video_id: Optional[int]) -> DataFrame:
     if video_id is None:
         return _placeholder_matrix_df()
     stmt = (
@@ -102,28 +109,41 @@ def _load_person_activity_matrix(video_id: Optional[int]) -> pd.DataFrame:
         .join(Activity, Activity.person_id == Person.id)
         .where(Activity.video_id == video_id)
     )
-    df = _load_dataframe(stmt)
-    if df.empty:
+    rows = _fetch_rows(stmt)
+    if not rows:
         return _placeholder_matrix_df()
-    df_any = cast(Any, df)
-    pivot = cast(
-        pd.DataFrame,
-        df_any.pivot_table(
-            index="person_type",
-            columns="activity_class",
-            values="duration",
-            aggfunc="sum",
-            fill_value=0,
-        ).reset_index(),
-    )
-    return pivot
+    # Накопим длительности в структуре {person_type -> {activity_class -> duration}}.
+    totals: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    all_classes: set[str] = set()
+    for row in rows:
+        person_type = str(row["person_type"])
+        activity_class = str(row["activity_class"])
+        duration = float(row["duration"])
+        totals[person_type][activity_class] += duration
+        all_classes.add(activity_class)
+    sorted_classes = sorted(all_classes)
+    records: list[dict[str, Any]] = []
+    for person_type in sorted(totals.keys()):
+        record: dict[str, Any] = {"person_type": person_type}
+        for activity_class in sorted_classes:
+            record[activity_class] = totals[person_type].get(activity_class, 0.0)
+        records.append(record)
+    return pd.DataFrame(records)
 
 
-def _load_dataframe(statement: Select[Any]) -> pd.DataFrame:
-    return cast(pd.DataFrame, pd.read_sql(statement, engine))
+def _load_dataframe(statement: Select[Any]) -> DataFrame:
+    rows = _fetch_rows(statement)
+    return pd.DataFrame(rows)
 
 
-def _placeholder_activity_df() -> pd.DataFrame:
+def _fetch_rows(statement: Select[Any]) -> list[dict[str, Any]]:
+    # Выполняем SQL-запрос в отдельной сессии и приводим строки к dict для Pandas.
+    with get_session() as session:
+        result = session.execute(statement)
+        return [dict(row) for row in result.mappings().all()]
+
+
+def _placeholder_activity_df() -> DataFrame:
     classes = ["walking", "monitoring", "repairing", "idle"]
     starts = np.arange(0, len(classes) * 60, 60)
     ends = starts + 55
@@ -140,13 +160,13 @@ def _placeholder_activity_df() -> pd.DataFrame:
     )
 
 
-def _placeholder_headcount_df() -> pd.DataFrame:
+def _placeholder_headcount_df() -> DataFrame:
     seconds = np.arange(0, 300, 15)
     counts = 2 + (np.sin(seconds / 60) > 0).astype(int)
     return pd.DataFrame({"time_sec": seconds, "count": counts})
 
 
-def _placeholder_matrix_df() -> pd.DataFrame:
+def _placeholder_matrix_df() -> DataFrame:
     data: Dict[str, list[int] | list[str]] = {
         "person_type": ["mechanic", "inspector", "welder"],
         "walking": [10, 5, 2],

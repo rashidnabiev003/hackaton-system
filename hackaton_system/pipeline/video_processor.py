@@ -56,6 +56,7 @@ class VideoProcessor:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self._detector: DetectorProtocol | None = None
+        # При создании процессора убеждаемся, что схема БД готова принимать данные.
         init_db()
 
     def process_video(self, video_path: str | Path) -> int:
@@ -81,12 +82,14 @@ class VideoProcessor:
         activities = self._infer_activities(detections)
 
         with get_session() as session:
+            # Фиксируем сам видеоролик и получаем первичный ключ (video.id).
             video = Video(filename=video_path.name, fps=fps, duration_sec=duration)
             session.add(video)
             session.flush()
 
             person_map = self._ensure_person_records(session=session, video=video, detections=detections)
 
+            # Сохраняем покадровые детекции.
             for det in detections:
                 bbox = det.bbox
                 detection_row = Detection(
@@ -102,6 +105,7 @@ class VideoProcessor:
                 )
                 session.add(detection_row)
 
+            # Добавляем интервалы активностей, если соответствующий трек найден.
             for activity in activities:
                 if activity.track_id not in person_map:
                     continue

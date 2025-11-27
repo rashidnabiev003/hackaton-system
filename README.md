@@ -113,6 +113,4 @@ activities(id, video_id, person_id, activity_class, t_start_sec, t_end_sec, acti
   - `hackaton_system/dashboard/data_access.py` – загрузка данных из БД + плейсхолдеры.
   - Стилизация через кастомный CSS, графики Plotly, fallback на демо-данные, чтобы UI всегда показывал красивую панель.
 
----
 
-Готовы расширить план под конкретный датасет, GPU и дедлайн: просто уточните вводные.
