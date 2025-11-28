@@ -111,7 +111,9 @@ class VideoProcessor:
         )
 
         detections, poses = self._run_detection(video_path, fps=fps)
-        activities = self._infer_activities(detections)
+        tracks = self._group_detections_by_track(detections)
+        activities = self._infer_activities(tracks, fps=fps)
+        role_map = self._infer_person_roles(tracks, fps=fps)
 
         with get_session() as session:
             # Фиксируем сам видеоролик и получаем первичный ключ (video.id).
@@ -351,18 +353,20 @@ class VideoProcessor:
         return grouped
 
     def _infer_activities(
-        self, tracks: Mapping[int, list[DetectionResult]], fps: float
+        self, tracks: Mapping[int, list[DetectionResult]], fps: float | None = None
     ) -> list[ActivityResult]:
         """Эвристическое определение активностей под заводской сценарий."""
 
         if not tracks:
             return []
 
+        effective_fps = fps if fps and fps > 0 else 25.0
+
         frame_states: list[FrameState] = []
         for track_id, dets in tracks.items():
             if not dets:
                 continue
-            frame_states.extend(self._classify_track_states(track_id, dets, fps))
+            frame_states.extend(self._classify_track_states(track_id, dets, effective_fps))
 
         if not frame_states:
             return []
