@@ -25,7 +25,9 @@ def list_available_videos() -> DataFrame:
 
     # Инициализируем БД на случай запуска сервиса «с нуля».
     init_db()
-    stmt = select(Video.id, Video.filename, Video.duration_sec, Video.fps).order_by(Video.id)
+    stmt = select(Video.id, Video.filename, Video.duration_sec, Video.fps).order_by(
+        Video.id
+    )
     df = _load_dataframe(stmt)
     if not df.empty:
         return df
@@ -49,7 +51,9 @@ def load_dashboard_data(video_id: Optional[int]) -> DashboardData:
     activities = _load_activity_df(video_id)
     headcount = _load_headcount_df(video_id)
     person_matrix = _load_person_activity_matrix(video_id)
-    return DashboardData(activities=activities, headcount=headcount, person_matrix=person_matrix)
+    return DashboardData(
+        activities=activities, headcount=headcount, person_matrix=person_matrix
+    )
 
 
 def _load_activity_df(video_id: Optional[int]) -> DataFrame:
@@ -92,7 +96,7 @@ def _load_headcount_df(video_id: Optional[int]) -> DataFrame:
     # Преобразуем интервальные множества в плоскую таблицу для построения графика.
     data: Dict[str, list[float] | list[int]] = {
         "time_sec": times,
-        "count": [len(counts[time_sec]) for time_sec in times],
+        "headcount": [len(counts[time_sec]) for time_sec in times],
     }
     return pd.DataFrame(data)
 
@@ -118,7 +122,7 @@ def _load_person_activity_matrix(video_id: Optional[int]) -> DataFrame:
     for row in rows:
         person_type = str(row["person_type"])
         activity_class = str(row["activity_class"])
-        duration = float(row["duration"])
+        duration = float(row["duration_sec"])
         totals[person_type][activity_class] += duration
         all_classes.add(activity_class)
     sorted_classes = sorted(all_classes)
@@ -145,14 +149,11 @@ def _fetch_rows(statement: Select[Any]) -> list[dict[str, Any]]:
 
 def _placeholder_activity_df() -> DataFrame:
     classes = ["walking", "monitoring", "repairing", "idle"]
-    starts = np.arange(0, len(classes) * 60, 60)
-    ends = starts + 55
-    person_types = ["mechanic", "inspector", "welder", "operator"]
+    duration_min = [10.0, 5.0, 30.0, 15.0]
     return pd.DataFrame(
         {
             "activity_class": classes,
-            "duration_sec": mins * 60,
-            "duration_min": mins,
+            "duration_min": duration_min,
         }
     )
 
@@ -181,9 +182,73 @@ def _placeholder_episodes_df() -> pd.DataFrame:
         {
             "person_id": [1, 1, 2, 3],
             "person_type": ["operator", "operator", "supervisor", "visitor"],
-            "activity_class": ["working", "idle_at_station", "walking", "in_restricted_zone"],
+            "activity_class": [
+                "working",
+                "idle_at_station",
+                "walking",
+                "in_restricted_zone",
+            ],
             "t_start_sec": starts[:4],
             "t_end_sec": ends[:4],
             "duration_sec": ends[:4] - starts[:4],
         }
     )
+
+
+def load_activity_summary(video_id: Optional[int]) -> DataFrame:
+    """Load activity summary with duration in minutes."""
+    df = _load_activity_df(video_id)
+    if df.empty:
+        return _placeholder_activity_df()
+    # Calculate duration in minutes from t_start_sec and t_end_sec
+    if "t_start_sec" in df.columns and "t_end_sec" in df.columns:
+        df = df.copy()
+        df["duration_sec"] = df["t_end_sec"] - df["t_start_sec"]
+        df["duration_min"] = df["duration_sec"] / 60.0
+        # Group by activity_class and sum durations
+        summary = df.groupby("activity_class", as_index=False)["duration_min"].sum()
+        return summary
+    # If already has duration_min, return as is
+    if "duration_min" in df.columns:
+        return df.groupby("activity_class", as_index=False)["duration_min"].sum()
+    return _placeholder_activity_df()
+
+
+def load_headcount(video_id: Optional[int]) -> DataFrame:
+    """Load headcount over time."""
+    return _load_headcount_df(video_id)
+
+
+def load_role_activity_matrix(video_id: Optional[int]) -> DataFrame:
+    """Load person type × activity matrix with durations in minutes."""
+    df = _load_person_activity_matrix(video_id)
+    if df.empty:
+        return _placeholder_matrix_df()
+    # Convert all numeric columns (activities) from seconds to minutes
+    df = df.copy()
+    activity_cols = [col for col in df.columns if col != "person_type"]
+    for col in activity_cols:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col] / 60.0
+    return df
+
+
+def load_person_episodes(video_id: Optional[int]) -> DataFrame:
+    """Load person activity episodes."""
+    if video_id is None:
+        return _placeholder_episodes_df()
+    stmt = (
+        select(
+            Person.id.label("person_id"),
+            Person.person_type,
+            Activity.activity_class,
+            Activity.t_start_sec,
+            Activity.t_end_sec,
+            (Activity.t_end_sec - Activity.t_start_sec).label("duration_sec"),
+        )
+        .join(Person, Activity.person_id == Person.id)
+        .where(Activity.video_id == video_id)
+        .order_by(Activity.t_start_sec)
+    )
+    df = _load_dataframe(stmt)
+    return df if not df.empty else _placeholder_episodes_df()

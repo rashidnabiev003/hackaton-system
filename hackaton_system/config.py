@@ -129,7 +129,6 @@ class Settings(BaseSettings):
     )
 
 
-
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return cached Settings instance."""
@@ -137,4 +136,3 @@ def get_settings() -> Settings:
     # lru_cache гарантирует, что настройки считываются один раз за запуск процесса,
     # а дальнейшие импорты получают готовый объект без повторного чтения .env.
     return Settings()
-

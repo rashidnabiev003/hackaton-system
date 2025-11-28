@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -30,7 +38,9 @@ class Video(Base):
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     fps: Mapped[float] = mapped_column(Float, default=25.0)
     duration_sec: Mapped[float] = mapped_column(Float, default=0.0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
 
     persons: Mapped[list["Person"]] = relationship(
         "Person", back_populates="video", cascade="all, delete-orphan"
@@ -68,9 +78,7 @@ class Person(Base):
 class Detection(Base):
     __tablename__ = "detections"
     """Покадровые рамки для каждого человека."""
-    __table_args__ = (
-        Index("ix_detections_video_time", "video_id", "time_sec"),
-    )
+    __table_args__ = (Index("ix_detections_video_time", "video_id", "time_sec"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     video_id: Mapped[int] = mapped_column(ForeignKey("videos.id"), nullable=False)
@@ -90,9 +98,7 @@ class Detection(Base):
 class Activity(Base):
     __tablename__ = "activities"
     """Интервалы активностей для треков."""
-    __table_args__ = (
-        Index("ix_activities_video_person", "video_id", "person_id"),
-    )
+    __table_args__ = (Index("ix_activities_video_person", "video_id", "person_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     video_id: Mapped[int] = mapped_column(ForeignKey("videos.id"), nullable=False)

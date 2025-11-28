@@ -1,28 +1,24 @@
 services:
   dashboard:
-    build: .
-    command:
-      [
-        "uv",
-        "run",
-        "streamlit",
-        "run",
-        "hackaton_system/dashboard/app.py",
-        "--server.port=8501",
-        "--server.address=0.0.0.0",
-      ]
+    image: hackaton-system:latest
+    container_name: hackaton-dashboard
     ports:
       - "8501:8501"
     environment:
       - HACKATON_DATABASE_URL=sqlite:///data/hackaton.db
+      - HACKATON_DATA_DIR=/app/data
     volumes:
-      - ./data:/app/data
+      - ./data:/app/data:rw
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - hackaton-network
 
-  processor:
-    build: .
-    command: ["tail", "-f", "/dev/null"]
-    environment:
-      - HACKATON_DATABASE_URL=sqlite:///data/hackaton.db
-    volumes:
-      - ./data:/app/data
-
+networks:
+  hackaton-network:
+    driver: bridge

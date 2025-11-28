@@ -20,8 +20,7 @@ LOGGER = logging.getLogger(__name__)
 class DetectorProtocol(Protocol):
     """Minimal interface required from the Ultralytics YOLO model."""
 
-    def track(self, *args: Any, **kwargs: Any) -> Iterable[Any]:
-        ...
+    def track(self, *args: Any, **kwargs: Any) -> Iterable[Any]: ...
 
 
 def _to_list(obj: Any) -> List[Any]:
@@ -148,7 +147,9 @@ class VideoProcessor:
                 )
 
             session.flush()
-            LOGGER.info("Committed video_id=%s with %s detections", video.id, len(detections))
+            LOGGER.info(
+                "Committed video_id=%s with %s detections", video.id, len(detections)
+            )
             return video.id
 
     def _extract_video_metadata(self, video_path: Path) -> tuple[float, int, float]:
@@ -188,8 +189,14 @@ class VideoProcessor:
                     frame_idx += 1
                     continue
 
-                xyxy_source = xyxy_attr.cpu() if hasattr(xyxy_attr, "cpu") else xyxy_attr
-                xyxy_data = xyxy_source.tolist() if hasattr(xyxy_source, "tolist") else xyxy_source
+                xyxy_source = (
+                    xyxy_attr.cpu() if hasattr(xyxy_attr, "cpu") else xyxy_attr
+                )
+                xyxy_data = (
+                    xyxy_source.tolist()
+                    if hasattr(xyxy_source, "tolist")
+                    else xyxy_source
+                )
                 xyxy: List[List[float]] = cast(List[List[float]], xyxy_data)
 
                 conf_attr = getattr(boxes, "conf", None)
@@ -215,7 +222,9 @@ class VideoProcessor:
 
                 frame_time = frame_idx / fps if fps else frame_idx
 
-                for bbox, conf, cls_id, track_id in zip(xyxy, confs, classes, track_ids):
+                for bbox, conf, cls_id, track_id in zip(
+                    xyxy, confs, classes, track_ids
+                ):
                     if cls_id is not None and int(cls_id) != 0:
                         # сохраняем только людей (class 0 в COCO)
                         continue
@@ -242,7 +251,11 @@ class VideoProcessor:
             LOGGER.error("Detection failed: %s", exc, exc_info=True)
             return []
 
-        LOGGER.info("Detection complete: %s frames processed, %s tracks", frame_idx, len(detections))
+        LOGGER.info(
+            "Detection complete: %s frames processed, %s tracks",
+            frame_idx,
+            len(detections),
+        )
         return detections
 
     def _group_detections_by_track(
@@ -282,7 +295,11 @@ class VideoProcessor:
                 merged.append(state)
                 continue
             last = merged[-1]
-            if state.track_id == last.track_id and state.label == last.label and state.start_sec <= last.end_sec + 1e-3:
+            if (
+                state.track_id == last.track_id
+                and state.label == last.label
+                and state.start_sec <= last.end_sec + 1e-3
+            ):
                 last.end_sec = max(last.end_sec, state.end_sec)
             else:
                 merged.append(state)
@@ -345,7 +362,7 @@ class VideoProcessor:
 
     def _zone_for_point(self, center: tuple[float, float]) -> ZoneDefinition | None:
         x, y = center
-        for zone in self._zones:
+        for zone in self.settings.zones:
             if zone.x_min <= x <= zone.x_max and zone.y_min <= y <= zone.y_max:
                 return zone
         return None
@@ -381,10 +398,16 @@ class VideoProcessor:
             if not role_totals:
                 assignments[track_id] = RoleAssignment(track_id, "unknown", 0.0)
                 continue
-            best_role, best_duration = max(role_totals.items(), key=lambda item: item[1])
+            best_role, best_duration = max(
+                role_totals.items(), key=lambda item: item[1]
+            )
             total_time = sum(role_totals.values())
             confidence = best_duration / total_time if total_time else 0.0
-            person_type = best_role if confidence >= self.settings.role_assignment_threshold else "unknown"
+            person_type = (
+                best_role
+                if confidence >= self.settings.role_assignment_threshold
+                else "unknown"
+            )
             assignments[track_id] = RoleAssignment(track_id, person_type, confidence)
         return assignments
 
@@ -464,7 +487,9 @@ class VideoProcessor:
 
             model_cls = getattr(ultralytics, "YOLO", None)
             if model_cls is None:
-                raise RuntimeError("Installed Ultralytics package does not expose the YOLO class.")
+                raise RuntimeError(
+                    "Installed Ultralytics package does not expose the YOLO class."
+                )
 
             self._detector = cast(DetectorProtocol, model_cls(weights))
         return self._detector

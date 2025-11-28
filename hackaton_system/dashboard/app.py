@@ -92,16 +92,22 @@ video_records: List[VideoRecord] = cast(
 video_options: Dict[str, int | None] = {
     record["filename"]: record.get("id") for record in video_records
 }
-selected_filename: str = st.sidebar.selectbox("Выберите ролик", list(video_options.keys()))
+selected_filename: str = st.sidebar.selectbox(
+    "Выберите ролик", list(video_options.keys())
+)
 selected_video_id: int | None = video_options[selected_filename]
 
-selected_meta = next((record for record in video_records if record["filename"] == selected_filename), None)
+selected_meta = next(
+    (record for record in video_records if record["filename"] == selected_filename),
+    None,
+)
 if selected_meta:
     minutes = selected_meta["duration_sec"] / 60
     st.sidebar.metric("Длительность", f"{minutes:.1f} мин")
     st.sidebar.metric("FPS", f"{selected_meta['fps']:.1f}")
 else:
     st.sidebar.info("Пока нет обработанных видео — отображаются демо-данные.")
+
 
 def _render_metric(title: str, value: str) -> None:
     st.markdown(
@@ -130,21 +136,33 @@ activity_summary = load_activity_summary(selected_video_id)
 role_matrix = load_role_activity_matrix(selected_video_id)
 episodes_df = load_person_episodes(selected_video_id)
 
-working_minutes = float(
-    activity_summary.loc[
-        activity_summary["activity_class"] == "working", "duration_min"
-    ].sum()
-) if not activity_summary.empty else 0.0
-idle_minutes = float(
-    activity_summary.loc[
-        activity_summary["activity_class"] == "idle_at_station", "duration_min"
-    ].sum()
-) if not activity_summary.empty else 0.0
-restricted_minutes = float(
-    activity_summary.loc[
-        activity_summary["activity_class"] == "in_restricted_zone", "duration_min"
-    ].sum()
-) if not activity_summary.empty else 0.0
+working_minutes = (
+    float(
+        activity_summary.loc[
+            activity_summary["activity_class"] == "working", "duration_min"
+        ].sum()
+    )
+    if not activity_summary.empty
+    else 0.0
+)
+idle_minutes = (
+    float(
+        activity_summary.loc[
+            activity_summary["activity_class"] == "idle_at_station", "duration_min"
+        ].sum()
+    )
+    if not activity_summary.empty
+    else 0.0
+)
+restricted_minutes = (
+    float(
+        activity_summary.loc[
+            activity_summary["activity_class"] == "in_restricted_zone", "duration_min"
+        ].sum()
+    )
+    if not activity_summary.empty
+    else 0.0
+)
 unique_people = episodes_df["person_id"].nunique() if not episodes_df.empty else 0
 
 col1, col2, col3 = st.columns(3)
@@ -159,7 +177,9 @@ with col3:
     _render_metric("Всего людей / нарушения", summary_caption)
 
 # Charts section
-st.markdown('<div class="section-title">Динамика людей на объекте</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="section-title">Динамика людей на объекте</div>', unsafe_allow_html=True
+)
 if not headcount_df.empty:
     headcount_fig = px.area(
         headcount_df,
@@ -174,14 +194,16 @@ if not headcount_df.empty:
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=False),
     )
-    st.plotly_chart(headcount_fig, use_container_width=True)
+    st.plotly_chart(headcount_fig, width="stretch")
 else:
     st.info("Нет данных по трекам — запустите пайплайн обработки.")
 
 left, right = st.columns(2)
 
 with left:
-    st.markdown('<div class="section-title">Время по активностям</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-title">Время по активностям</div>', unsafe_allow_html=True
+    )
     if not activity_summary.empty:
         duration_fig = px.bar(
             activity_summary,
@@ -197,12 +219,15 @@ with left:
             showlegend=False,
             margin=dict(l=10, r=10, t=10, b=10),
         )
-        st.plotly_chart(duration_fig, use_container_width=True)
+        st.plotly_chart(duration_fig, width="stretch")
     else:
         st.info("Добавьте активности, чтобы увидеть распределение времени.")
 
 with right:
-    st.markdown('<div class="section-title">Матрица “роль × активность”</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-title">Матрица “роль × активность”</div>',
+        unsafe_allow_html=True,
+    )
     if not role_matrix.empty:
         heatmap_source = role_matrix.set_index("person_type")
         heatmap_fig = px.imshow(
@@ -215,16 +240,18 @@ with right:
             template="plotly_dark",
             margin=dict(l=10, r=10, t=40, b=10),
         )
-        st.plotly_chart(heatmap_fig, use_container_width=True)
+        st.plotly_chart(heatmap_fig, width="stretch")
     else:
         st.info("Пока нет данных для построения матрицы.")
 
 st.markdown('<div class="section-title">Таблица эпизодов</div>', unsafe_allow_html=True)
 if not episodes_df.empty:
-    role_options = sorted(episodes_df["person_type"].dropna().unique().tolist()) or ["unknown"]
-    activity_options = sorted(episodes_df["activity_class"].dropna().unique().tolist()) or [
-        "walking"
+    role_options = sorted(episodes_df["person_type"].dropna().unique().tolist()) or [
+        "unknown"
     ]
+    activity_options = sorted(
+        episodes_df["activity_class"].dropna().unique().tolist()
+    ) or ["walking"]
     filter_col1, filter_col2 = st.columns(2)
     with filter_col1:
         selected_roles = st.multiselect(
@@ -255,8 +282,10 @@ if not episodes_df.empty:
     )
     st.dataframe(
         filtered,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 else:
-    st.info("Нет записанных эпизодов — выполните обработку видео или загрузите демо-данные.")
+    st.info(
+        "Нет записанных эпизодов — выполните обработку видео или загрузите демо-данные."
+    )
