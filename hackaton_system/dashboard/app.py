@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, TypedDict, cast
 
 import pandas as pd
@@ -13,6 +14,7 @@ from hackaton_system.dashboard.data_access import (
     load_person_episodes,
     load_role_activity_matrix,
 )
+from hackaton_system.pipeline import VideoProcessor
 
 px = cast(Any, _px)
 st = cast(Any, _st)
@@ -82,8 +84,42 @@ CUSTOM_CSS = """
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-# Sidebar — приводим датафрейм к TypedDict, чтобы типы были явные
-st.sidebar.header("Видео")
+# Sidebar — сначала даём возможность запустить обработку, потом выбор готового ролика
+st.sidebar.header("Обработка видео")
+uploaded_video = st.sidebar.file_uploader(
+    "Загрузите файл", type=["mp4", "mov", "avi", "mkv"], accept_multiple_files=False
+)
+manual_path = st.sidebar.text_input("...или укажите путь к файлу", value="")
+process_clicked = st.sidebar.button("Запустить обработку", use_container_width=True)
+if process_clicked:
+    target_path: Path | None = None
+    if uploaded_video is not None:
+        video_dir = Path("video")
+        video_dir.mkdir(parents=True, exist_ok=True)
+        target_path = video_dir / uploaded_video.name
+        with open(target_path, "wb") as dst:
+            dst.write(uploaded_video.getbuffer())
+    elif manual_path.strip():
+        candidate = Path(manual_path.strip())
+        if candidate.exists():
+            target_path = candidate
+        else:
+            st.sidebar.error("Файл по указанному пути не найден.")
+    else:
+        st.sidebar.warning("Сначала добавьте файл или путь, затем запускайте обработку.")
+
+    if target_path is not None:
+        try:
+            status_box = st.sidebar.empty()
+            with status_box, st.spinner("Запускаем пайплайн..."):
+                processor = VideoProcessor()
+                video_id = processor.process_video(target_path)
+            status_box.success(f"Готово! video_id={video_id}")
+            st.experimental_rerun()
+        except Exception as exc:  # pragma: no cover - интерактивная ошибка
+            status_box.error(f"Ошибка обработки: {exc}")
+
+st.sidebar.header("Просмотр результатов")
 videos_df: pd.DataFrame = list_available_videos()
 video_records: List[VideoRecord] = cast(
     List[VideoRecord],
