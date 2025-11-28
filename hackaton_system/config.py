@@ -20,7 +20,8 @@ class Settings(BaseSettings):
 
     # URL подключения к БД; по умолчанию используем локальный SQLite в каталоге data.
     database_url: str = Field(
-        default="sqlite:///data/hackaton.db",
+        # default="sqlite:///data/hackaton.db",
+        default="sqlite:///C:/Users/SKade/Documents/VScode/Hackaton/BD/Hackaton_db.db",
         description="SQLAlchemy-compatible database URL.",
     )
     # Путь к каталогу с данными — через него создаём директории при инициализации БД.
@@ -30,10 +31,14 @@ class Settings(BaseSettings):
     )
     # Опциональные пути к весам: оставляем None, чтобы брать значения по умолчанию из Ultralytics.
     detection_model_path: str | None = Field(
-        default=None, description="Path to the YOLO weights file."
+        default="./yolo11n.pt", description="./yolo11n.pt"
+    )
+    enable_pose_capture: bool = Field(
+        default=True,
+        description="Persist pose keypoints when the underlying YOLO weights expose them.",
     )
     activity_model_path: str | None = Field(
-        default=None, description="Path to the action recognition weights."
+        default="./yolo11n-pose.pt", description="Path to the action recognition weights."
     )
 
 

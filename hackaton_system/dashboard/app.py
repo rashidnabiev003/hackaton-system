@@ -217,6 +217,42 @@ with right:
     else:
         st.info("Пока нет данных для построения матрицы.")
 
+st.markdown('<div class="section-title">Хронология движения по трекам</div>', unsafe_allow_html=True)
+motion_df = activity_df[activity_df["activity_class"] == "moving"].copy()
+if motion_df.empty and not activity_df.empty:
+    motion_df = activity_df.copy()
+if not motion_df.empty:
+    motion_df = motion_df.rename(columns={"t_start_sec": "start_sec", "t_end_sec": "end_sec"})
+    motion_df["duration_sec"] = motion_df["end_sec"] - motion_df["start_sec"]
+    motion_df["person_label"] = motion_df.apply(
+        lambda row: f"{row['person_type']} · ID {row['track_id']}"
+        if isinstance(row.get("person_type"), str)
+        else f"Track {row['track_id']}",
+        axis=1,
+    )
+    timeline_fig = px.bar(
+        motion_df,
+        x="duration_sec",
+        y="person_label",
+        base="start_sec",
+        color="activity_class",
+        orientation="h",
+        labels={
+            "duration_sec": "Длительность, сек",
+            "start_sec": "Начало, сек",
+            "person_label": "Сотрудник / Track",
+            "activity_class": "Активность",
+        },
+    )
+    timeline_fig.update_layout(
+        template="plotly_dark",
+        margin=dict(l=10, r=10, t=20, b=10),
+        xaxis_title="Секунды от начала видео",
+    )
+    st.plotly_chart(timeline_fig, use_container_width=True)
+else:
+    st.info("Нет данных о движении — обработайте ролик, чтобы увидеть таймлайн.")
+
 st.markdown('<div class="section-title">Таблица эпизодов</div>', unsafe_allow_html=True)
 if not activity_df.empty:
     display_df = activity_df[["track_id", "person_type", "activity_class", "t_start_sec", "t_end_sec"]].copy()

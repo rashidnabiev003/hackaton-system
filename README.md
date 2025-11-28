@@ -39,6 +39,7 @@ videos(video_id, filename, fps, duration_sec)
 persons(person_id, video_id, track_id, person_type)
 detections(id, video_id, person_id, frame_id, time_sec, x_min, y_min, x_max, y_max, confidence)
 activities(id, video_id, person_id, activity_class, t_start_sec, t_end_sec, activity_conf)
+pose_keypoints(id, video_id, person_id, frame_id, time_sec, keypoints, pose_conf)
 ```
 
 *Логика:* при обработке видео создаём запись в `videos`, далее по каждому `track_id` вставляем `persons`, детекции и интервалы активности.

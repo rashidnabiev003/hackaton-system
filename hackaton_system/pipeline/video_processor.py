@@ -11,7 +11,15 @@ import cv2
 from sqlalchemy.orm import Session
 
 from hackaton_system.config import Settings, get_settings
-from hackaton_system.db import Activity, Detection, Person, Video, get_session, init_db
+from hackaton_system.db import (
+    Activity,
+    Detection,
+    Person,
+    PoseKeypoints,
+    Video,
+    get_session,
+    init_db,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +47,15 @@ class DetectionResult:
     bbox: tuple[int, int, int, int]
     confidence: float
     track_id: int
+
+
+@dataclass(slots=True)
+class PoseResult:
+    frame_id: int
+    time_sec: float
+    track_id: int
+    keypoints: list[dict[str, float]]
+    confidence: float
 
 
 @dataclass(slots=True)
@@ -78,7 +95,7 @@ class VideoProcessor:
             duration,
         )
 
-        detections = self._run_detection(video_path, fps=fps)
+        detections, poses = self._run_detection(video_path, fps=fps)
         activities = self._infer_activities(detections)
 
         with get_session() as session:
@@ -120,8 +137,28 @@ class VideoProcessor:
                     )
                 )
 
+            if poses and self.settings.enable_pose_capture:
+                for pose in poses:
+                    if pose.track_id not in person_map:
+                        continue
+                    session.add(
+                        PoseKeypoints(
+                            video_id=video.id,
+                            person_id=person_map[pose.track_id].id,
+                            frame_id=pose.frame_id,
+                            time_sec=pose.time_sec,
+                            keypoints=pose.keypoints,
+                            pose_conf=pose.confidence,
+                        )
+                    )
+
             session.flush()
-            LOGGER.info("Committed video_id=%s with %s detections", video.id, len(detections))
+            LOGGER.info(
+                "Committed video_id=%s with %s detections and %s pose rows",
+                video.id,
+                len(detections),
+                len(poses) if self.settings.enable_pose_capture else 0,
+            )
             return video.id
 
     def _extract_video_metadata(self, video_path: Path) -> tuple[float, int, float]:
@@ -134,11 +171,12 @@ class VideoProcessor:
         cap.release()
         return fps, frames, duration
 
-    def _run_detection(self, video_path: Path, fps: float) -> list[DetectionResult]:
+    def _run_detection(self, video_path: Path, fps: float) -> tuple[list[DetectionResult], list[PoseResult]]:
         """Выполняем детекцию + трекинг через Ultralytics YOLO."""
 
         model: DetectorProtocol = self._load_detector()
         detections: list[DetectionResult] = []
+        poses: list[PoseResult] = []
         frame_idx = 0
 
         try:
@@ -182,9 +220,35 @@ class VideoProcessor:
                 else:
                     track_ids = [None for _ in xyxy]
 
+                keypoints_attr = getattr(result, "keypoints", None)
+                kp_xy_attr = getattr(keypoints_attr, "xy", None) if keypoints_attr is not None else None
+                kp_conf_attr = getattr(keypoints_attr, "conf", None) if keypoints_attr is not None else None
+
+                keypoints_xy: List[List[List[float]] | None]
+                if kp_xy_attr is not None:
+                    kp_xy_source = kp_xy_attr.cpu() if hasattr(kp_xy_attr, "cpu") else kp_xy_attr
+                    kp_xy_data = kp_xy_source.tolist() if hasattr(kp_xy_source, "tolist") else kp_xy_source
+                    keypoints_xy = cast(List[List[List[float]]], kp_xy_data)
+                    if len(keypoints_xy) != len(xyxy):
+                        keypoints_xy = [None for _ in xyxy]
+                else:
+                    keypoints_xy = [None for _ in xyxy]
+
+                keypoints_conf: List[List[float] | None]
+                if kp_conf_attr is not None:
+                    kp_conf_source = kp_conf_attr.cpu() if hasattr(kp_conf_attr, "cpu") else kp_conf_attr
+                    kp_conf_data = kp_conf_source.tolist() if hasattr(kp_conf_source, "tolist") else kp_conf_source
+                    keypoints_conf = cast(List[List[float]], kp_conf_data)
+                    if len(keypoints_conf) != len(xyxy):
+                        keypoints_conf = [None for _ in xyxy]
+                else:
+                    keypoints_conf = [None for _ in xyxy]
+
                 frame_time = frame_idx / fps if fps else frame_idx
 
-                for bbox, conf, cls_id, track_id in zip(xyxy, confs, classes, track_ids):
+                for bbox, conf, cls_id, track_id, kp_xy, kp_conf in zip(
+                    xyxy, confs, classes, track_ids, keypoints_xy, keypoints_conf
+                ):
                     if cls_id is not None and int(cls_id) != 0:
                         # сохраняем только людей (class 0 в COCO)
                         continue
@@ -203,14 +267,42 @@ class VideoProcessor:
                             track_id=int(track_id),
                         )
                     )
+                    if kp_xy is not None:
+                        confidences = kp_conf or []
+                        valid_scores = [score for score in confidences if score is not None]
+                        avg_conf = (
+                            float(sum(valid_scores) / len(valid_scores)) if valid_scores else float(conf)
+                        )
+                        padded_conf = confidences if confidences else [None] * len(kp_xy)
+                        keypoints_payload: list[dict[str, float]] = []
+                        for idx_point, point in enumerate(kp_xy):
+                            entry: dict[str, float] = {"x": float(point[0]), "y": float(point[1])}
+                            score = padded_conf[idx_point] if idx_point < len(padded_conf) else None
+                            if score is not None:
+                                entry["confidence"] = float(score)
+                            keypoints_payload.append(entry)
+                        poses.append(
+                            PoseResult(
+                                frame_id=frame_idx,
+                                time_sec=frame_time,
+                                track_id=int(track_id),
+                                keypoints=keypoints_payload,
+                                confidence=avg_conf,
+                            )
+                        )
                 frame_idx += 1
 
         except Exception as exc:
             LOGGER.error("Detection failed: %s", exc, exc_info=True)
-            return []
+            return [], []
 
-        LOGGER.info("Detection complete: %s frames processed, %s tracks", frame_idx, len(detections))
-        return detections
+        LOGGER.info(
+            "Detection complete: %s frames processed, %s tracks, %s pose entries",
+            frame_idx,
+            len(detections),
+            len(poses),
+        )
+        return detections, poses
 
     def _infer_activities(self, detections: Sequence[DetectionResult]) -> list[ActivityResult]:
         """Простейшая эвристика активности: двигается / стоит."""

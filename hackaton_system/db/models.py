@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -35,6 +35,9 @@ class Video(Base):
     activities: Mapped[list["Activity"]] = relationship(
         "Activity", back_populates="video", cascade="all, delete-orphan"
     )
+    poses: Mapped[list["PoseKeypoints"]] = relationship(
+        "PoseKeypoints", back_populates="video", cascade="all, delete-orphan"
+    )
 
 
 class Person(Base):
@@ -52,6 +55,9 @@ class Person(Base):
     )
     activities: Mapped[list["Activity"]] = relationship(
         "Activity", back_populates="person", cascade="all, delete-orphan"
+    )
+    poses: Mapped[list["PoseKeypoints"]] = relationship(
+        "PoseKeypoints", back_populates="person", cascade="all, delete-orphan"
     )
 
 
@@ -88,3 +94,19 @@ class Activity(Base):
 
     video: Mapped["Video"] = relationship("Video", back_populates="activities")
     person: Mapped["Person"] = relationship("Person", back_populates="activities")
+
+
+class PoseKeypoints(Base):
+    __tablename__ = "pose_keypoints"
+    """Pose estimation results linked to tracked persons."""
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    video_id: Mapped[int] = mapped_column(ForeignKey("videos.id"), nullable=False)
+    person_id: Mapped[int] = mapped_column(ForeignKey("persons.id"), nullable=False)
+    frame_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    time_sec: Mapped[float] = mapped_column(Float, nullable=False)
+    keypoints: Mapped[list[dict[str, float]]] = mapped_column(JSON, nullable=False)
+    pose_conf: Mapped[float] = mapped_column(Float, default=0.0)
+
+    video: Mapped["Video"] = relationship("Video", back_populates="poses")
+    person: Mapped["Person"] = relationship("Person", back_populates="poses")

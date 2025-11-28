@@ -25,3 +25,15 @@ def test_get_settings_reads_env(monkeypatch: Any, tmp_path: Path) -> None:
     assert settings.data_dir == Path(data_dir)
     # lru_cache ensures repeated calls return the same object
     assert config.get_settings() is settings
+
+
+def test_pose_capture_flag_follow_env(monkeypatch: Any) -> None:
+    """Pose persistence flag should follow environment overrides."""
+
+    monkeypatch.setenv("HACKATON_ENABLE_POSE_CAPTURE", "false")
+
+    import hackaton_system.config as config
+
+    config = importlib.reload(config)
+    settings = config.get_settings()
+    assert settings.enable_pose_capture is False

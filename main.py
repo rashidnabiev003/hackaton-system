@@ -1,3 +1,5 @@
+import logging
+import sys
 from pathlib import Path
 
 import typer
@@ -5,6 +7,12 @@ import typer
 from hackaton_system.db import init_db
 from hackaton_system.db.seeder import seed_demo_data
 from hackaton_system.pipeline import VideoProcessor
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
 
 app = typer.Typer(help="Hackathon video analytics toolkit")
 

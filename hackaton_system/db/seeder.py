@@ -3,7 +3,15 @@ from __future__ import annotations
 import logging
 from random import Random
 
-from hackaton_system.db import Activity, Detection, Person, Video, get_session, init_db
+from hackaton_system.db import (
+    Activity,
+    Detection,
+    Person,
+    PoseKeypoints,
+    Video,
+    get_session,
+    init_db,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,6 +30,7 @@ def seed_demo_data(force: bool = False) -> int:
 
         if force:
             session.query(Activity).delete()
+            session.query(PoseKeypoints).delete()
             session.query(Detection).delete()
             session.query(Person).delete()
             session.query(Video).delete()
