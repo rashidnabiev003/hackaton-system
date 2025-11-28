@@ -245,9 +245,9 @@ with right:
         st.info("Пока нет данных для построения матрицы.")
 
 st.markdown('<div class="section-title">Хронология движения по трекам</div>', unsafe_allow_html=True)
-motion_df = activity_df[activity_df["activity_class"] == "moving"].copy()
-if motion_df.empty and not activity_df.empty:
-    motion_df = activity_df.copy()
+motion_df = episodes_df[episodes_df["activity_class"] == "moving"].copy()
+if motion_df.empty and not episodes_df.empty:
+    motion_df = episodes_df.copy()
 if not motion_df.empty:
     motion_df = motion_df.rename(columns={"t_start_sec": "start_sec", "t_end_sec": "end_sec"})
     motion_df["duration_sec"] = motion_df["end_sec"] - motion_df["start_sec"]
@@ -309,6 +309,7 @@ if not episodes_df.empty:
     filtered = filtered.rename(
         columns={
             "person_id": "Person ID",
+            "track_id": "Track ID",
             "person_type": "Тип",
             "activity_class": "Активность",
             "t_start_sec": "Начало, сек",
@@ -317,7 +318,17 @@ if not episodes_df.empty:
         }
     )
     st.dataframe(
-        filtered,
+        filtered[
+            [
+                "Person ID",
+                "Track ID",
+                "Тип",
+                "Активность",
+                "Начало, сек",
+                "Конец, сек",
+                "Длительность, сек",
+            ]
+        ],
         width="stretch",
         hide_index=True,
     )

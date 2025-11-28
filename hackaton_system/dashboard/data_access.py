@@ -181,6 +181,7 @@ def _placeholder_episodes_df() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "person_id": [1, 1, 2, 3],
+            "track_id": [101, 101, 202, 303],
             "person_type": ["operator", "operator", "supervisor", "visitor"],
             "activity_class": [
                 "working",
@@ -240,6 +241,7 @@ def load_person_episodes(video_id: Optional[int]) -> DataFrame:
     stmt = (
         select(
             Person.id.label("person_id"),
+            Person.track_id,
             Person.person_type,
             Activity.activity_class,
             Activity.t_start_sec,
