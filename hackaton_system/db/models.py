@@ -60,6 +60,7 @@ class Person(Base):
     track_id: Mapped[int] = mapped_column(Integer, nullable=False)
     person_type: Mapped[str] = mapped_column(String(50), default="unknown")
     person_type_conf: Mapped[float] = mapped_column(Float, default=0.0)
+    reid_descriptor: Mapped[str | None] = mapped_column(String, nullable=True)
 
     video: Mapped["Video"] = relationship("Video", back_populates="persons")
     detections: Mapped[list["Detection"]] = relationship(

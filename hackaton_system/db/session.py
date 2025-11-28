@@ -26,11 +26,11 @@ def init_db() -> None:
         Path(settings.data_dir).mkdir(parents=True, exist_ok=True)
     # DeclarativeBase знает про все модели, поэтому create_all создаёт таблицы целиком.
     Base.metadata.create_all(bind=engine)
-    _ensure_person_type_conf_column()
+    _ensure_person_optional_columns()
 
 
-def _ensure_person_type_conf_column() -> None:
-    """Быстрое «миграционное» решение для старых баз без нового поля."""
+def _ensure_person_optional_columns() -> None:
+    """Ensure recent optional columns exist for SQLite databases."""
 
     if engine.dialect.name != "sqlite":
         return
@@ -40,6 +40,10 @@ def _ensure_person_type_conf_column() -> None:
         if "person_type_conf" not in column_names:
             conn.exec_driver_sql(
                 "ALTER TABLE persons ADD COLUMN person_type_conf FLOAT DEFAULT 0.0"
+            )
+        if "reid_descriptor" not in column_names:
+            conn.exec_driver_sql(
+                "ALTER TABLE persons ADD COLUMN reid_descriptor TEXT"
             )
 
 

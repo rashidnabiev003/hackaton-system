@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+import json
 import math
 from dataclasses import dataclass
 from importlib import import_module
@@ -10,7 +11,13 @@ import subprocess
 from typing import Any, Iterable, List, Mapping, Protocol, Sequence, cast
 
 import cv2
+import numpy as np
+import torch
+import torch.nn.functional as F
+from PIL import Image
 from sqlalchemy.orm import Session
+from torchvision import transforms
+from torchvision.models import ResNet18_Weights, resnet18
 
 from hackaton_system.config import Settings, get_settings
 from hackaton_system.db import (
@@ -48,6 +55,7 @@ class DetectionResult:
     bbox: tuple[int, int, int, int]
     confidence: float
     track_id: int
+    embedding: list[float] | None = None
 
 
 @dataclass(slots=True)
@@ -89,6 +97,15 @@ class VideoProcessor:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self._detector: DetectorProtocol | None = None
+        self._reid_model: torch.nn.Module | None = None
+        self._reid_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._reid_transform = transforms.Compose(
+            [
+                transforms.Resize((256, 128)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        )
         # При создании процессора убеждаемся, что схема БД готова принимать данные.
         init_db()
 
@@ -112,7 +129,10 @@ class VideoProcessor:
         )
 
         detections, poses = self._run_detection(video_path, fps=fps)
+        if getattr(self.settings, "reid_enabled", True):
+            detections = self._stitch_tracks_with_reid(detections)
         tracks = self._group_detections_by_track(detections)
+        track_embeddings = self._compute_track_embeddings(tracks)
         activities = self._infer_activities(tracks, fps=fps)
         role_map = self._infer_person_roles(tracks, fps=fps)
         preview_path: Path | None = None
@@ -124,7 +144,10 @@ class VideoProcessor:
             session.flush()
 
             person_map = self._ensure_person_records(
-                session=session, video=video, detections=detections
+                session=session,
+                video=video,
+                detections=detections,
+                track_embeddings=track_embeddings,
             )
 
             for track_id, assignment in role_map.items():
@@ -296,6 +319,7 @@ class VideoProcessor:
                     keypoints_conf = [None for _ in xyxy]
 
                 frame_time = frame_idx / fps if fps else frame_idx
+                frame_img = getattr(result, "orig_img", None)
 
                 for bbox, conf, cls_id, track_id, kp_xy, kp_conf in zip(
                     xyxy, confs, classes, track_ids, keypoints_xy, keypoints_conf
@@ -311,6 +335,12 @@ class VideoProcessor:
                         tuple[int, int, int, int],
                         tuple(int(coord) for coord in bbox),
                     )
+                    embedding_vec = None
+                    if frame_img is not None:
+                        try:
+                            embedding_vec = self._extract_embedding(frame_img, bbox_tuple)
+                        except Exception:
+                            embedding_vec = None
                     detections.append(
                         DetectionResult(
                             frame_id=frame_idx,
@@ -318,6 +348,7 @@ class VideoProcessor:
                             bbox=bbox_tuple,
                             confidence=float(conf),
                             track_id=int(track_id),
+                            embedding=embedding_vec,
                         )
                     )
                     if kp_xy is not None:
@@ -558,15 +589,18 @@ class VideoProcessor:
         session: Session,
         video: Video,
         detections: Iterable[DetectionResult],
+        track_embeddings: Mapping[int, str] | None = None,
     ) -> dict[int, Person]:
         track_ids = sorted({det.track_id for det in detections})
         person_map: dict[int, Person] = {}
         for track_id in track_ids:
+            descriptor = track_embeddings.get(track_id) if track_embeddings else None
             person = Person(
                 video_id=video.id,
                 track_id=track_id,
                 person_type="unknown",
                 person_type_conf=0.0,
+                reid_descriptor=descriptor,
             )
             session.add(person)
             session.flush()
@@ -594,6 +628,85 @@ class VideoProcessor:
 
             self._detector = cast(DetectorProtocol, model_cls(weights))
         return self._detector
+
+    def _stitch_tracks_with_reid(
+        self, detections: list[DetectionResult]
+    ) -> list[DetectionResult]:
+        if not detections or not any(det.embedding for det in detections):
+            return detections
+
+        tracks = self._group_detections_by_track(detections)
+        summaries: list[dict[str, Any]] = []
+        for track_id, dets in tracks.items():
+            embeddings = [
+                np.array(det.embedding, dtype=np.float32) for det in dets if det.embedding
+            ]
+            if not embeddings:
+                continue
+            mean_vec = np.mean(embeddings, axis=0)
+            norm = np.linalg.norm(mean_vec)
+            if not norm:
+                continue
+            summaries.append(
+                {
+                    "track_id": track_id,
+                    "start": dets[0].time_sec,
+                    "end": dets[-1].time_sec,
+                    "embedding": mean_vec / norm,
+                }
+            )
+
+        summaries.sort(key=lambda item: item["start"])
+        if not summaries:
+            return detections
+
+        gap_limit = getattr(self.settings, "reid_time_gap_sec", 2.5)
+        similarity_thresh = getattr(self.settings, "reid_similarity_threshold", 0.6)
+
+        mapping: dict[int, int] = {track_id: track_id for track_id in tracks.keys()}
+        history: list[dict[str, Any]] = []
+        for summary in summaries:
+            assigned = mapping[summary["track_id"]]
+            best_match_id = None
+            best_similarity = similarity_thresh
+            for candidate in history:
+                if summary["start"] < candidate["end"]:
+                    continue
+                gap = summary["start"] - candidate["end"]
+                if gap > gap_limit or gap < 0:
+                    continue
+                sim = float(np.dot(summary["embedding"], candidate["embedding"]))
+                if sim >= best_similarity:
+                    best_similarity = sim
+                    best_match_id = candidate["assigned_id"]
+            if best_match_id is not None:
+                mapping[summary["track_id"]] = best_match_id
+                summary["assigned_id"] = best_match_id
+            else:
+                summary["assigned_id"] = assigned
+            history.append(summary)
+
+        for det in detections:
+            det.track_id = mapping.get(det.track_id, det.track_id)
+        return detections
+
+    def _compute_track_embeddings(
+        self, tracks: Mapping[int, list[DetectionResult]]
+    ) -> dict[int, str]:
+        result: dict[int, str] = {}
+        for track_id, dets in tracks.items():
+            embeddings = [
+                np.array(det.embedding, dtype=np.float32) for det in dets if det.embedding
+            ]
+            if not embeddings:
+                continue
+            mean_vec = np.mean(embeddings, axis=0)
+            norm = np.linalg.norm(mean_vec)
+            if not norm:
+                continue
+            normalized = (mean_vec / norm).tolist()
+            result[track_id] = json.dumps(normalized)
+        return result
 
     def _render_preview(
         self,
@@ -729,3 +842,43 @@ class VideoProcessor:
 
         value = (track_id * 37) % 255
         return (value, (value * 2) % 255, (value * 3) % 255)
+
+    def _ensure_reid_model(self) -> torch.nn.Module | None:
+        if not getattr(self.settings, "reid_enabled", True):
+            return None
+        if self._reid_model is None:
+            try:
+                model = resnet18(weights=ResNet18_Weights.DEFAULT)
+            except Exception as exc:  # pragma: no cover
+                LOGGER.warning("Failed to load ReID backbone: %s", exc)
+                return None
+            model.fc = torch.nn.Identity()
+            model.eval()
+            model.to(self._reid_device)
+            self._reid_model = model
+        return self._reid_model
+
+    def _extract_embedding(
+        self, frame: np.ndarray, bbox: tuple[int, int, int, int]
+    ) -> list[float] | None:
+        model = self._ensure_reid_model()
+        if model is None:
+            return None
+
+        x1, y1, x2, y2 = bbox
+        h, w = frame.shape[:2]
+        x1 = max(0, min(w - 1, x1))
+        x2 = max(0, min(w, x2))
+        y1 = max(0, min(h - 1, y1))
+        y2 = max(0, min(h, y2))
+        if x2 - x1 < 4 or y2 - y1 < 4:
+            return None
+
+        crop = frame[y1:y2, x1:x2]
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb)
+        tensor = self._reid_transform(pil_img).unsqueeze(0).to(self._reid_device)
+        with torch.no_grad():
+            emb = model(tensor)
+            emb = F.normalize(emb, dim=1)
+        return emb.squeeze(0).cpu().tolist()

@@ -66,6 +66,16 @@ class Settings(BaseSettings):
         default="C:/Users/SKade/AppData/Roaming/ffmpeg/bin/ffmpeg.exe",
         description="Path to ffmpeg binary (if None, assumes ffmpeg available in PATH).",
     )
+    reid_enabled: bool = Field(
+        default=True, description="Enable ReID-assisted track stitching."
+    )
+    reid_similarity_threshold: float = Field(
+        default=0.6, description="Cosine similarity threshold for merging tracks."
+    )
+    reid_time_gap_sec: float = Field(
+        default=2.5,
+        description="Maximum time gap (sec) between tracks considered for stitching.",
+    )
     video_output_dir: Path = Field(
         default=Path("runs/visualizations"),
         description="Directory where annotated preview videos will be stored.",
