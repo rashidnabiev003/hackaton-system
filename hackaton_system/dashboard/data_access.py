@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 from pandas import DataFrame
-from sqlalchemy import Select, select
+from sqlalchemy import Select, delete, select
 
 from hackaton_system.db.models import Activity, Detection, Person, Video
 from hackaton_system.db.session import get_session, init_db
@@ -254,3 +254,16 @@ def load_person_episodes(video_id: Optional[int]) -> DataFrame:
     )
     df = _load_dataframe(stmt)
     return df if not df.empty else _placeholder_episodes_df()
+
+
+def delete_video_and_related(video_id: int) -> int:
+    """Remove a processed video and all dependent rows. Returns deleted video_id or 0."""
+
+    init_db()
+    with get_session() as session:
+        video = session.query(Video).filter(Video.id == video_id).first()
+        if video is None:
+            return 0
+        session.delete(video)
+        session.flush()
+        return video_id

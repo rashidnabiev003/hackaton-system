@@ -8,6 +8,7 @@ import plotly.express as _px  # type: ignore[import]
 import streamlit as _st  # type: ignore[import]
 
 from hackaton_system.dashboard.data_access import (
+    delete_video_and_related,
     list_available_videos,
     load_activity_summary,
     load_headcount,
@@ -85,39 +86,51 @@ CUSTOM_CSS = """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # Sidebar — сначала даём возможность запустить обработку, потом выбор готового ролика
+RAW_VIDEO_DIR = Path("video")
+RAW_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
 st.sidebar.header("Обработка видео")
 uploaded_video = st.sidebar.file_uploader(
     "Загрузите файл", type=["mp4", "mov", "avi", "mkv"], accept_multiple_files=False
 )
-manual_path = st.sidebar.text_input("...или укажите путь к файлу", value="")
 process_clicked = st.sidebar.button("Запустить обработку", use_container_width=True)
 if process_clicked:
-    target_path: Path | None = None
-    if uploaded_video is not None:
-        video_dir = Path("video")
-        video_dir.mkdir(parents=True, exist_ok=True)
-        target_path = video_dir / uploaded_video.name
+    if uploaded_video is None:
+        st.sidebar.warning("Сначала загрузите файл, затем запускайте обработку.")
+    else:
+        target_path = RAW_VIDEO_DIR / uploaded_video.name
         with open(target_path, "wb") as dst:
             dst.write(uploaded_video.getbuffer())
-    elif manual_path.strip():
-        candidate = Path(manual_path.strip())
-        if candidate.exists():
-            target_path = candidate
-        else:
-            st.sidebar.error("Файл по указанному пути не найден.")
-    else:
-        st.sidebar.warning("Сначала добавьте файл или путь, затем запускайте обработку.")
-
-    if target_path is not None:
         try:
             status_box = st.sidebar.empty()
             with status_box, st.spinner("Запускаем пайплайн..."):
                 processor = VideoProcessor()
                 video_id = processor.process_video(target_path)
             status_box.success(f"Готово! video_id={video_id}")
-            st.experimental_rerun()
+            st.rerun()
         except Exception as exc:  # pragma: no cover - интерактивная ошибка
             status_box.error(f"Ошибка обработки: {exc}")
+
+st.sidebar.header("Файлы на сервере")
+raw_files = sorted(
+    [p for p in RAW_VIDEO_DIR.glob("*") if p.is_file()],
+    key=lambda p: p.name.lower(),
+)
+if raw_files:
+    raw_names = [file.name for file in raw_files]
+    selected_raw = st.sidebar.selectbox("Загруженные файлы", raw_names)
+    selected_raw_path = RAW_VIDEO_DIR / selected_raw
+    size_mb = selected_raw_path.stat().st_size / (1024 * 1024)
+    st.sidebar.caption(f"Размер: {size_mb:.2f} MB")
+    if st.sidebar.button("Удалить файл", key="delete_raw_file"):
+        try:
+            selected_raw_path.unlink()
+            st.sidebar.success("Файл удалён.")
+            st.rerun()
+        except Exception as exc:  # pragma: no cover - UI feedback
+            st.sidebar.error(f"Не удалось удалить файл: {exc}")
+else:
+    st.sidebar.info("Нет загруженных роликов. Добавьте файл через форму выше.")
 
 st.sidebar.header("Просмотр результатов")
 videos_df: pd.DataFrame = list_available_videos()
@@ -141,6 +154,15 @@ if selected_meta:
     minutes = selected_meta["duration_sec"] / 60
     st.sidebar.metric("Длительность", f"{minutes:.1f} мин")
     st.sidebar.metric("FPS", f"{selected_meta['fps']:.1f}")
+    if selected_video_id is not None and st.sidebar.button(
+        "Удалить обработанные данные", type="secondary"
+    ):
+        removed = delete_video_and_related(selected_video_id)
+        if removed:
+            st.sidebar.success("Видео и связанные данные удалены.")
+        else:
+            st.sidebar.warning("Запись не найдена или уже удалена.")
+        st.rerun()
 else:
     st.sidebar.info("Пока нет обработанных видео — отображаются демо-данные.")
 
