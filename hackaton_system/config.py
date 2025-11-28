@@ -50,6 +50,26 @@ class Settings(BaseSettings):
         default=True,
         description="Persist pose keypoints when the underlying YOLO weights expose them.",
     )
+    enable_video_render: bool = Field(
+        default=True,
+        description="Render annotated video previews for processed runs.",
+    )
+    preview_max_side: int = Field(
+        default=1920,
+        description="Max width/height for rendered previews (frames are downscaled preserving aspect ratio).",
+    )
+    preview_frame_step: int = Field(
+        default=1,
+        description="Write every N-th frame to preview to reduce size (1 = every frame).",
+    )
+    preview_ffmpeg_path: str | None = Field(
+        default="C:/Users/SKade/AppData/Roaming/ffmpeg/bin/ffmpeg.exe",
+        description="Path to ffmpeg binary (if None, assumes ffmpeg available in PATH).",
+    )
+    video_output_dir: Path = Field(
+        default=Path("runs/visualizations"),
+        description="Directory where annotated preview videos will be stored.",
+    )
     tracker_config_path: str = Field(
         default="bytetrack.yaml",
         description="Tracker configuration name/path for Ultralytics track API.",

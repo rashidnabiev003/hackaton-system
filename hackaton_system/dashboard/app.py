@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, TypedDict, cast
 
@@ -7,6 +8,7 @@ import pandas as pd
 import plotly.express as _px  # type: ignore[import]
 import streamlit as _st  # type: ignore[import]
 
+from hackaton_system.config import get_settings
 from hackaton_system.dashboard.data_access import (
     delete_video_and_related,
     list_available_videos,
@@ -19,6 +21,34 @@ from hackaton_system.pipeline import VideoProcessor
 
 px = cast(Any, _px)
 st = cast(Any, _st)
+settings = get_settings()
+PREVIEW_DIR = getattr(settings, "video_output_dir", Path("runs/visualizations"))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    force=True,
+)
+
+
+def _process_video_file(target_path: Path) -> None:
+    status_box = st.sidebar.empty()
+    try:
+        with status_box, st.spinner("Запускаем пайплайн..."):
+            processor = VideoProcessor()
+            video_id = processor.process_video(target_path)
+        preview_candidate = PREVIEW_DIR / f"{video_id}_{target_path.stem}.mp4"
+        if preview_candidate.exists():
+            status_box.success(
+                f"Готово! video_id={video_id}. Визуализация: {preview_candidate.name}"
+            )
+        else:
+            status_box.warning(
+                f"Готово! video_id={video_id}, но превью не найдено. Проверьте журналы консоли."
+            )
+        st.rerun()
+    except Exception as exc:  # pragma: no cover - интерактивная ошибка
+        status_box.error(f"Ошибка обработки: {exc}")
 
 
 class VideoRecord(TypedDict):
@@ -93,7 +123,7 @@ st.sidebar.header("Обработка видео")
 uploaded_video = st.sidebar.file_uploader(
     "Загрузите файл", type=["mp4", "mov", "avi", "mkv"], accept_multiple_files=False
 )
-process_clicked = st.sidebar.button("Запустить обработку", use_container_width=True)
+process_clicked = st.sidebar.button("Запустить обработку", width="stretch")
 if process_clicked:
     if uploaded_video is None:
         st.sidebar.warning("Сначала загрузите файл, затем запускайте обработку.")
@@ -101,15 +131,7 @@ if process_clicked:
         target_path = RAW_VIDEO_DIR / uploaded_video.name
         with open(target_path, "wb") as dst:
             dst.write(uploaded_video.getbuffer())
-        try:
-            status_box = st.sidebar.empty()
-            with status_box, st.spinner("Запускаем пайплайн..."):
-                processor = VideoProcessor()
-                video_id = processor.process_video(target_path)
-            status_box.success(f"Готово! video_id={video_id}")
-            st.rerun()
-        except Exception as exc:  # pragma: no cover - интерактивная ошибка
-            status_box.error(f"Ошибка обработки: {exc}")
+        _process_video_file(target_path)
 
 st.sidebar.header("Файлы на сервере")
 raw_files = sorted(
@@ -122,6 +144,8 @@ if raw_files:
     selected_raw_path = RAW_VIDEO_DIR / selected_raw
     size_mb = selected_raw_path.stat().st_size / (1024 * 1024)
     st.sidebar.caption(f"Размер: {size_mb:.2f} MB")
+    if st.sidebar.button("Обработать выбранный файл", key="process_existing_raw"):
+        _process_video_file(selected_raw_path)
     if st.sidebar.button("Удалить файл", key="delete_raw_file"):
         try:
             selected_raw_path.unlink()
@@ -225,14 +249,27 @@ unique_people = episodes_df["person_id"].nunique() if not episodes_df.empty else
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    _render_metric("Работа у станков", f"{working_minutes:.1f} мин")
+    _render_metric("Работа", f"{working_minutes:.1f} мин")
 with col2:
-    _render_metric("Простой у станков", f"{idle_minutes:.1f} мин")
+    _render_metric("Простой", f"{idle_minutes:.1f} мин")
 with col3:
     summary_caption = f"{unique_people} чел"
     if restricted_minutes > 0:
         summary_caption += f" · {restricted_minutes:.1f} мин в запрете"
     _render_metric("Всего людей / нарушения", summary_caption)
+
+preview_path: Path | None = None
+if selected_video_id:
+    candidate = PREVIEW_DIR / f"{selected_video_id}_{Path(selected_filename).stem}.mp4"
+    if candidate.exists():
+        preview_path = candidate
+
+st.markdown('<div class="section-title">Видео с разметкой</div>', unsafe_allow_html=True)
+if preview_path and preview_path.exists():
+    with open(preview_path, "rb") as preview_file:
+        st.video(preview_file.read(), format="video/mp4")
+else:
+    st.info("Пока нет визуализации для этого ролика.")
 
 # Charts section
 st.markdown(
@@ -334,7 +371,7 @@ if not motion_df.empty:
         margin=dict(l=10, r=10, t=20, b=10),
         xaxis_title="Секунды от начала видео",
     )
-    st.plotly_chart(timeline_fig, use_container_width=True)
+    st.plotly_chart(timeline_fig, width="stretch")
 else:
     st.info("Нет данных о движении — обработайте ролик, чтобы увидеть таймлайн.")
 
