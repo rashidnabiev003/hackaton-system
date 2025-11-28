@@ -41,30 +41,40 @@ def seed_demo_data(force: bool = False) -> int:
         session.add(video)
         session.flush()
 
-        person_types = ["mechanic", "inspector", "welder"]
-        activities = [
-            ["walking", "inspecting", "idle"],
-            ["supervising", "documenting", "idle"],
-            ["welding", "cooling_down", "idle"],
+        person_types = ["operator", "supervisor", "visitor"]
+        activity_blocks = [
+            ["working", "idle_at_station", "walking"],
+            ["walking", "standing", "walking"],
+            ["walking", "in_restricted_zone", "standing"],
         ]
+        base_boxes = {
+            "operator": (180, 260, 320, 520),
+            "supervisor": (100, 120, 220, 260),
+            "visitor": (940, 420, 1080, 620),
+        }
 
         total_rows = 0
         for track_id, person_type in enumerate(person_types, start=1):
             # фиксируем человека + его "профессию"
-            person = Person(video_id=video.id, track_id=track_id, person_type=person_type)
+            person = Person(
+                video_id=video.id,
+                track_id=track_id,
+                person_type=person_type,
+                person_type_conf=0.9,
+            )
             session.add(person)
             session.flush()
 
             frame = 0
-            timestamps: list[float] = []
+            x_min, y_min, x_max, y_max = base_boxes[person_type]
             while frame <= 300:
                 # имитируем, что трекер отдаёт рамки каждые 15 кадров
                 time_sec = frame / video.fps
                 bbox = (
-                    100 + track_id * 10 + rng.randint(-5, 5),
-                    120 + rng.randint(-3, 3),
-                    200 + track_id * 10 + rng.randint(0, 5),
-                    320 + rng.randint(0, 5),
+                    x_min + rng.randint(-5, 5),
+                    y_min + rng.randint(-5, 5),
+                    x_max + rng.randint(0, 5),
+                    y_max + rng.randint(0, 5),
                 )
                 detection = Detection(
                     video_id=video.id,
@@ -78,11 +88,10 @@ def seed_demo_data(force: bool = False) -> int:
                     confidence=0.8,
                 )
                 session.add(detection)
-                timestamps.append(time_sec)
                 frame += 15
                 total_rows += 1
 
-            blocks = activities[track_id - 1]
+            blocks = activity_blocks[track_id - 1]
             block_duration = video.duration_sec / len(blocks)
             for idx, activity in enumerate(blocks):
                 # делим всю длительность видео на блоки активности
