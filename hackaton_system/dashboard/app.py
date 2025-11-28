@@ -7,9 +7,11 @@ import plotly.express as _px  # type: ignore[import]
 import streamlit as _st  # type: ignore[import]
 
 from hackaton_system.dashboard.data_access import (
-    DashboardData,
     list_available_videos,
-    load_dashboard_data,
+    load_activity_summary,
+    load_headcount,
+    load_person_episodes,
+    load_role_activity_matrix,
 )
 
 px = cast(Any, _px)
@@ -90,18 +92,21 @@ video_records: List[VideoRecord] = cast(
 video_options: Dict[str, int | None] = {
     record["filename"]: record.get("id") for record in video_records
 }
-selected_filename: str = st.sidebar.selectbox("Выберите ролик", list(video_options.keys()))
+selected_filename: str = st.sidebar.selectbox(
+    "Выберите ролик", list(video_options.keys())
+)
 selected_video_id: int | None = video_options[selected_filename]
 
-selected_meta = next((record for record in video_records if record["filename"] == selected_filename), None)
+selected_meta = next(
+    (record for record in video_records if record["filename"] == selected_filename),
+    None,
+)
 if selected_meta:
     minutes = selected_meta["duration_sec"] / 60
     st.sidebar.metric("Длительность", f"{minutes:.1f} мин")
     st.sidebar.metric("FPS", f"{selected_meta['fps']:.1f}")
 else:
     st.sidebar.info("Пока нет обработанных видео — отображаются демо-данные.")
-
-data: DashboardData = load_dashboard_data(selected_video_id)
 
 
 def _render_metric(title: str, value: str) -> None:
@@ -126,39 +131,62 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-activity_df: pd.DataFrame = data.activities.copy()
-activity_df["duration_sec"] = activity_df["t_end_sec"] - activity_df["t_start_sec"]
-total_minutes = activity_df["duration_sec"].sum() / 60 if not activity_df.empty else 0
-unique_people = (
-    activity_df["person_type"].nunique()
-    if "person_type" in activity_df.columns and not activity_df.empty
-    else 0
+headcount_df = load_headcount(selected_video_id)
+activity_summary = load_activity_summary(selected_video_id)
+role_matrix = load_role_activity_matrix(selected_video_id)
+episodes_df = load_person_episodes(selected_video_id)
+
+working_minutes = (
+    float(
+        activity_summary.loc[
+            activity_summary["activity_class"] == "working", "duration_min"
+        ].sum()
+    )
+    if not activity_summary.empty
+    else 0.0
 )
-activity_df_any = cast(Any, activity_df)
-dominant_activity_value = (
-    activity_df_any.groupby("activity_class")["duration_sec"].sum().idxmax()
-    if not activity_df.empty
-    else "нет данных"
+idle_minutes = (
+    float(
+        activity_summary.loc[
+            activity_summary["activity_class"] == "idle_at_station", "duration_min"
+        ].sum()
+    )
+    if not activity_summary.empty
+    else 0.0
 )
-dominant_activity = str(dominant_activity_value)
+restricted_minutes = (
+    float(
+        activity_summary.loc[
+            activity_summary["activity_class"] == "in_restricted_zone", "duration_min"
+        ].sum()
+    )
+    if not activity_summary.empty
+    else 0.0
+)
+unique_people = episodes_df["person_id"].nunique() if not episodes_df.empty else 0
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    _render_metric("Суммарное активное время", f"{total_minutes:.1f} мин")
+    _render_metric("Работа у станков", f"{working_minutes:.1f} мин")
 with col2:
-    _render_metric("Уникальных сотрудников", str(unique_people))
+    _render_metric("Простой у станков", f"{idle_minutes:.1f} мин")
 with col3:
-    _render_metric("Топ-активность", dominant_activity.title())
+    summary_caption = f"{unique_people} чел"
+    if restricted_minutes > 0:
+        summary_caption += f" · {restricted_minutes:.1f} мин в запрете"
+    _render_metric("Всего людей / нарушения", summary_caption)
 
 # Charts section
-st.markdown('<div class="section-title">Динамика людей на объекте</div>', unsafe_allow_html=True)
-if not data.headcount.empty:
+st.markdown(
+    '<div class="section-title">Динамика людей на объекте</div>', unsafe_allow_html=True
+)
+if not headcount_df.empty:
     headcount_fig = px.area(
-        data.headcount,
+        headcount_df,
         x="time_sec",
-        y="count",
+        y="headcount",
         color_discrete_sequence=["#22d3ee"],
-        labels={"time_sec": "Секунды", "count": "Люди"},
+        labels={"time_sec": "Секунды", "headcount": "Люди"},
     )
     headcount_fig.update_layout(
         template="plotly_dark",
@@ -166,20 +194,17 @@ if not data.headcount.empty:
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=False),
     )
-    st.plotly_chart(headcount_fig, use_container_width=True)
+    st.plotly_chart(headcount_fig, width="stretch")
 else:
     st.info("Нет данных по трекам — запустите пайплайн обработки.")
 
 left, right = st.columns(2)
 
 with left:
-    st.markdown('<div class="section-title">Время по активностям</div>', unsafe_allow_html=True)
-    if not activity_df.empty:
-        activity_summary: pd.DataFrame = cast(
-            pd.DataFrame,
-            activity_df_any.groupby("activity_class")["duration_sec"].sum().reset_index(),
-        )
-        activity_summary["duration_min"] = activity_summary["duration_sec"] / 60
+    st.markdown(
+        '<div class="section-title">Время по активностям</div>', unsafe_allow_html=True
+    )
+    if not activity_summary.empty:
         duration_fig = px.bar(
             activity_summary,
             x="activity_class",
@@ -194,15 +219,17 @@ with left:
             showlegend=False,
             margin=dict(l=10, r=10, t=10, b=10),
         )
-        st.plotly_chart(duration_fig, use_container_width=True)
+        st.plotly_chart(duration_fig, width="stretch")
     else:
         st.info("Добавьте активности, чтобы увидеть распределение времени.")
 
 with right:
-    st.markdown('<div class="section-title">Матрица “роль × активность”</div>', unsafe_allow_html=True)
-    matrix_df: pd.DataFrame = data.person_matrix
-    if not matrix_df.empty:
-        heatmap_source = matrix_df.set_index("person_type")
+    st.markdown(
+        '<div class="section-title">Матрица “роль × активность”</div>',
+        unsafe_allow_html=True,
+    )
+    if not role_matrix.empty:
+        heatmap_source = role_matrix.set_index("person_type")
         heatmap_fig = px.imshow(
             heatmap_source,
             color_continuous_scale="viridis",
@@ -213,7 +240,7 @@ with right:
             template="plotly_dark",
             margin=dict(l=10, r=10, t=40, b=10),
         )
-        st.plotly_chart(heatmap_fig, use_container_width=True)
+        st.plotly_chart(heatmap_fig, width="stretch")
     else:
         st.info("Пока нет данных для построения матрицы.")
 
@@ -254,22 +281,47 @@ else:
     st.info("Нет данных о движении — обработайте ролик, чтобы увидеть таймлайн.")
 
 st.markdown('<div class="section-title">Таблица эпизодов</div>', unsafe_allow_html=True)
-if not activity_df.empty:
-    display_df = activity_df[["track_id", "person_type", "activity_class", "t_start_sec", "t_end_sec"]].copy()
-    display_df["Длительность, сек"] = display_df["t_end_sec"] - display_df["t_start_sec"]
-    display_df = display_df.rename(
+if not episodes_df.empty:
+    role_options = sorted(episodes_df["person_type"].dropna().unique().tolist()) or [
+        "unknown"
+    ]
+    activity_options = sorted(
+        episodes_df["activity_class"].dropna().unique().tolist()
+    ) or ["walking"]
+    filter_col1, filter_col2 = st.columns(2)
+    with filter_col1:
+        selected_roles = st.multiselect(
+            "Тип сотрудника",
+            role_options,
+            default=role_options,
+        )
+    with filter_col2:
+        selected_activities = st.multiselect(
+            "Активность",
+            activity_options,
+            default=activity_options,
+        )
+    filtered = episodes_df[
+        episodes_df["person_type"].isin(selected_roles)
+        & episodes_df["activity_class"].isin(selected_activities)
+    ].copy()
+    filtered["duration_sec"] = filtered["duration_sec"].round(1)
+    filtered = filtered.rename(
         columns={
-            "track_id": "Track ID",
+            "person_id": "Person ID",
             "person_type": "Тип",
             "activity_class": "Активность",
             "t_start_sec": "Начало, сек",
             "t_end_sec": "Конец, сек",
+            "duration_sec": "Длительность, сек",
         }
     )
     st.dataframe(
-        display_df,
-        use_container_width=True,
+        filtered,
+        width="stretch",
         hide_index=True,
     )
 else:
-    st.info("Нет записанных эпизодов — выполните обработку видео или загрузите демо-данные.")
+    st.info(
+        "Нет записанных эпизодов — выполните обработку видео или загрузите демо-данные."
+    )
