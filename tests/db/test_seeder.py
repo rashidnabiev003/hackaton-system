@@ -8,7 +8,9 @@ from types import ModuleType
 from typing import Any
 
 
-def _reload_db(monkeypatch: Any, tmp_path: Path) -> tuple[ModuleType, ModuleType, ModuleType]:
+def _reload_db(
+    monkeypatch: Any, tmp_path: Path
+) -> tuple[ModuleType, ModuleType, ModuleType]:
     db_path = tmp_path / "seed.db"
     monkeypatch.setenv("HACKATON_DATABASE_URL", f"sqlite:///{db_path}")
     monkeypatch.setenv("HACKATON_DATA_DIR", str(tmp_path))
