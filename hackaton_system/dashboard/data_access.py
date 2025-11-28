@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 from pandas import DataFrame
-from sqlalchemy import Select, delete, select
+from sqlalchemy import Select, select
 
+from hackaton_system.config import get_settings
 from hackaton_system.db.models import Activity, Detection, Person, Video
 from hackaton_system.db.session import get_session, init_db
 
@@ -260,10 +262,18 @@ def delete_video_and_related(video_id: int) -> int:
     """Remove a processed video and all dependent rows. Returns deleted video_id or 0."""
 
     init_db()
+    settings = get_settings()
+    preview_dir = getattr(settings, "video_output_dir", Path("runs/visualizations"))
     with get_session() as session:
         video = session.query(Video).filter(Video.id == video_id).first()
         if video is None:
             return 0
+        preview_path = preview_dir / f"{video.id}_{Path(video.filename).stem}.mp4"
         session.delete(video)
         session.flush()
+        if preview_path.exists():
+            try:
+                preview_path.unlink()
+            except OSError:
+                pass
         return video_id

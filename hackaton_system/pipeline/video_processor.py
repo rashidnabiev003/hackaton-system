@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
+import subprocess
 from typing import Any, Iterable, List, Mapping, Protocol, Sequence, cast
 
 import cv2
@@ -114,6 +115,7 @@ class VideoProcessor:
         tracks = self._group_detections_by_track(detections)
         activities = self._infer_activities(tracks, fps=fps)
         role_map = self._infer_person_roles(tracks, fps=fps)
+        preview_path: Path | None = None
 
         with get_session() as session:
             # Фиксируем сам видеоролик и получаем первичный ключ (video.id).
@@ -185,6 +187,19 @@ class VideoProcessor:
                 len(detections),
                 len(poses) if self.settings.enable_pose_capture else 0,
             )
+            should_render = bool(getattr(self.settings, "enable_video_render", True))
+            if should_render:
+                try:
+                    preview_path = self._render_preview(
+                        source=video_path,
+                        video_id=video.id,
+                        detections=detections,
+                        fps=fps,
+                    )
+                    if preview_path:
+                        LOGGER.info("Preview video stored at %s", preview_path)
+                except Exception as exc:  # pragma: no cover - visualization is optional
+                    LOGGER.warning("Failed to render preview video: %s", exc)
             return video.id
 
     def _extract_video_metadata(self, video_path: Path) -> tuple[float, int, float]:
@@ -579,3 +594,138 @@ class VideoProcessor:
 
             self._detector = cast(DetectorProtocol, model_cls(weights))
         return self._detector
+
+    def _render_preview(
+        self,
+        source: Path,
+        video_id: int,
+        detections: Sequence[DetectionResult],
+        fps: float,
+    ) -> Path | None:
+        """Собрать отдельное видео с разметкой боксов."""
+
+        if not source.exists():
+            return None
+
+        output_dir = getattr(self.settings, "video_output_dir", Path("runs/visualizations"))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        frame_step_setting = max(1, int(getattr(self.settings, "preview_frame_step", 2)))
+        max_side = max(1, int(getattr(self.settings, "preview_max_side", 640)))
+
+        cap = cv2.VideoCapture(str(source))
+        if not cap.isOpened():
+            return None
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        fps_src = fps or cap.get(cv2.CAP_PROP_FPS) or 25.0
+        if width <= 0 or height <= 0:
+            cap.release()
+            return None
+
+        scale = 1.0
+        if max(width, height) > max_side:
+            scale = max_side / max(width, height)
+        target_width = max(1, int(round(width * scale)))
+        target_height = max(1, int(round(height * scale)))
+        if target_width % 2:
+            target_width += 1
+        if target_height % 2:
+            target_height += 1
+
+        fps_out = max(fps_src / frame_step_setting, 1.0)
+
+        ffmpeg_bin = getattr(self.settings, "preview_ffmpeg_path", None) or "ffmpeg"
+        output_path = output_dir / f"{video_id}_{source.stem}.mp4"
+        if output_path.exists():
+            try:
+                output_path.unlink()
+            except OSError:
+                LOGGER.warning("Could not remove existing preview: %s", output_path)
+        ffmpeg_cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{target_width}x{target_height}",
+            "-r",
+            f"{fps_out}",
+            "-i",
+            "-",
+            "-vf",
+            "format=yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "30",
+            str(output_path),
+        ]
+
+        try:
+            proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+        except FileNotFoundError as exc:  # pragma: no cover - depends on env
+            LOGGER.warning("ffmpeg binary not found: %s", exc)
+            return None
+
+        frame_map: dict[int, list[DetectionResult]] = defaultdict(list)
+        for det in detections:
+            frame_map[det.frame_id].append(det)
+
+        frame_idx = 0
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if frame_idx % frame_step_setting != 0:
+                    frame_idx += 1
+                    continue
+                if scale != 1.0:
+                    annotated = cv2.resize(
+                        frame, (target_width, target_height), interpolation=cv2.INTER_AREA
+                    )
+                else:
+                    annotated = frame
+                ratio_x = annotated.shape[1] / width
+                ratio_y = annotated.shape[0] / height
+                for det in frame_map.get(frame_idx, []):
+                    color = self._color_for_track(det.track_id)
+                    x1, y1, x2, y2 = det.bbox
+                    x1 = int(x1 * ratio_x)
+                    x2 = int(x2 * ratio_x)
+                    y1 = int(y1 * ratio_y)
+                    y2 = int(y2 * ratio_y)
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                    label = f"ID {det.track_id}"
+                    cv2.putText(
+                        annotated,
+                        label,
+                        (x1, max(y1 - 5, 0)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        color,
+                        2,
+                        lineType=cv2.LINE_AA,
+                    )
+                if proc.stdin:
+                    proc.stdin.write(annotated.tobytes())
+                frame_idx += 1
+        finally:
+            cap.release()
+            if proc.stdin:
+                proc.stdin.close()
+            proc.wait()
+
+        return output_path if output_path.exists() else None
+
+    @staticmethod
+    def _color_for_track(track_id: int) -> tuple[int, int, int]:
+        """Детерминированный цвет (BGR) для конкретного трека."""
+
+        value = (track_id * 37) % 255
+        return (value, (value * 2) % 255, (value * 3) % 255)
