@@ -66,15 +66,53 @@ class Settings(BaseSettings):
         default="C:/Users/SKade/AppData/Roaming/ffmpeg/bin/ffmpeg.exe",
         description="Path to ffmpeg binary (if None, assumes ffmpeg available in PATH).",
     )
+    preview_draw_poses: bool = Field(
+        default=True,
+        description="Overlay pose skeletons on preview videos when pose data is available.",
+    )
+    pose_conf_threshold: float = Field(
+        default=0.2,
+        description="Minimum pose keypoint confidence for visualization and analytics.",
+    )
+    use_patch_inference: bool = Field(
+        default=False,
+        description="Enable YOLO patch-based inference for high-recall detection.",
+    )
+    patch_shape_x: int = Field(
+        default=960,
+        description="Patch width when using patch-based inference.",
+    )
+    patch_shape_y: int = Field(
+        default=960,
+        description="Patch height when using patch-based inference.",
+    )
+    patch_overlap_x: int = Field(
+        default=200,
+        description="Horizontal overlap (pixels) between neighboring patches.",
+    )
+    patch_overlap_y: int = Field(
+        default=200,
+        description="Vertical overlap (pixels) between neighboring patches.",
+    )
+    patch_nms_threshold: float = Field(
+        default=0.25,
+        description="Patch-based NMS threshold when combining detections.",
+    )
     reid_enabled: bool = Field(
         default=True, description="Enable ReID-assisted track stitching."
     )
     reid_similarity_threshold: float = Field(
-        default=0.6, description="Cosine similarity threshold for merging tracks."
+        default=0.7, description="Cosine similarity threshold for merging tracks."
     )
     reid_time_gap_sec: float = Field(
-        default=2.5,
+        default=2.2,
         description="Maximum time gap (sec) between tracks considered for stitching.",
+    )
+    reid_model_name: str = Field(
+        default="osnet_x1_0", description="Torchreid model name for feature extraction."
+    )
+    reid_model_path: str | None = Field(
+        default=None, description="Optional custom checkpoint for Torchreid model."
     )
     video_output_dir: Path = Field(
         default=Path("runs/visualizations"),
