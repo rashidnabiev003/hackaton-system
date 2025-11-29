@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 import json
 import math
@@ -18,6 +19,16 @@ from PIL import Image
 from sqlalchemy.orm import Session
 from torchvision import transforms
 from torchvision.models import ResNet18_Weights, resnet18
+
+try:  # torchreid is optional; fall back to torchvision if missing
+    from torchreid.utils import FeatureExtractor  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - optional dependency
+    FeatureExtractor = None
+
+try:  # OCR is optional
+    import easyocr
+except ImportError:  # pragma: no cover - optional dependency
+    easyocr = None
 
 from hackaton_system.config import Settings, get_settings
 from hackaton_system.db import (
@@ -68,6 +79,17 @@ class PoseResult:
 
 
 @dataclass(slots=True)
+class TrainDetectionResult:
+    frame_id: int
+    time_sec: float
+    bbox: tuple[int, int, int, int]
+    confidence: float
+    track_id: int
+    number: str | None = None
+    number_confidence: float | None = None
+
+
+@dataclass(slots=True)
 class ActivityResult:
     track_id: int
     activity_class: str
@@ -97,7 +119,8 @@ class VideoProcessor:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self._detector: DetectorProtocol | None = None
-        self._reid_model: torch.nn.Module | None = None
+        self._reid_model: Any | None = None
+        self._reid_uses_torchreid = False
         self._reid_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._reid_transform = transforms.Compose(
             [
@@ -106,6 +129,7 @@ class VideoProcessor:
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ]
         )
+        self._train_ocr_reader: Any | None = None
         # При создании процессора убеждаемся, что схема БД готова принимать данные.
         init_db()
 
@@ -128,7 +152,7 @@ class VideoProcessor:
             duration,
         )
 
-        detections, poses = self._run_detection(video_path, fps=fps)
+        detections, poses, train_events = self._run_detection(video_path, fps=fps)
         if getattr(self.settings, "reid_enabled", True):
             detections = self._stitch_tracks_with_reid(detections)
         tracks = self._group_detections_by_track(detections)
@@ -217,12 +241,15 @@ class VideoProcessor:
                         source=video_path,
                         video_id=video.id,
                         detections=detections,
+                        train_detections=train_events,
                         fps=fps,
                     )
                     if preview_path:
                         LOGGER.info("Preview video stored at %s", preview_path)
                 except Exception as exc:  # pragma: no cover - visualization is optional
                     LOGGER.warning("Failed to render preview video: %s", exc)
+            if train_events:
+                self._store_train_events(video_path, video.id, train_events)
             return video.id
 
     def _extract_video_metadata(self, video_path: Path) -> tuple[float, int, float]:
@@ -235,12 +262,22 @@ class VideoProcessor:
         cap.release()
         return fps, frames, duration
 
-    def _run_detection(self, video_path: Path, fps: float) -> tuple[list[DetectionResult], list[PoseResult]]:
-        """Выполняем детекцию + трекинг через Ultralytics YOLO."""
+    def _run_detection(
+        self, video_path: Path, fps: float
+    ) -> tuple[list[DetectionResult], list[PoseResult], list[TrainDetectionResult]]:
+        """????????? ???????? + ??????? ????? Ultralytics YOLO."""
 
         model: DetectorProtocol = self._load_detector()
         detections: list[DetectionResult] = []
         poses: list[PoseResult] = []
+        trains: list[TrainDetectionResult] = []
+        enable_train = bool(getattr(self.settings, "enable_train_detection", False))
+        track_classes = [0, 6] if enable_train else [0]
+        tracker_conf = (
+            min(self.settings.detection_conf, self.settings.train_detection_conf)
+            if enable_train
+            else self.settings.detection_conf
+        )
         frame_idx = 0
 
         try:
@@ -251,8 +288,8 @@ class VideoProcessor:
                 save=False,
                 show=False,
                 verbose=False,
-                classes=[0],
-                conf=self.settings.detection_conf,
+                classes=track_classes,
+                conf=tracker_conf,
                 iou=self.settings.detection_iou,
                 imgsz=self.settings.detection_imgsz,
             )
@@ -324,69 +361,89 @@ class VideoProcessor:
                 for bbox, conf, cls_id, track_id, kp_xy, kp_conf in zip(
                     xyxy, confs, classes, track_ids, keypoints_xy, keypoints_conf
                 ):
-                    if cls_id is not None and int(cls_id) != 0:
-                        # сохраняем только людей (class 0 в COCO)
+                    if cls_id is None:
                         continue
-                    if track_id is None:
-                        continue
-                    if conf < self.settings.detection_conf:
-                        continue
+                    cls_int = int(cls_id)
                     bbox_tuple = cast(
                         tuple[int, int, int, int],
                         tuple(int(coord) for coord in bbox),
                     )
-                    embedding_vec = None
-                    if frame_img is not None:
-                        try:
-                            embedding_vec = self._extract_embedding(frame_img, bbox_tuple)
-                        except Exception:
-                            embedding_vec = None
-                    detections.append(
-                        DetectionResult(
-                            frame_id=frame_idx,
-                            time_sec=frame_time,
-                            bbox=bbox_tuple,
-                            confidence=float(conf),
-                            track_id=int(track_id),
-                            embedding=embedding_vec,
-                        )
-                    )
-                    if kp_xy is not None:
-                        confidences = kp_conf or []
-                        valid_scores = [score for score in confidences if score is not None]
-                        avg_conf = (
-                            float(sum(valid_scores) / len(valid_scores)) if valid_scores else float(conf)
-                        )
-                        padded_conf = confidences if confidences else [None] * len(kp_xy)
-                        keypoints_payload: list[dict[str, float]] = []
-                        for idx_point, point in enumerate(kp_xy):
-                            entry: dict[str, float] = {"x": float(point[0]), "y": float(point[1])}
-                            score = padded_conf[idx_point] if idx_point < len(padded_conf) else None
-                            if score is not None:
-                                entry["confidence"] = float(score)
-                            keypoints_payload.append(entry)
-                        poses.append(
-                            PoseResult(
+                    if cls_int == 0:
+                        if track_id is None:
+                            continue
+                        if conf < self.settings.detection_conf:
+                            continue
+                        embedding_vec = None
+                        if frame_img is not None:
+                            try:
+                                embedding_vec = self._extract_embedding(frame_img, bbox_tuple)
+                            except Exception:
+                                embedding_vec = None
+                        detections.append(
+                            DetectionResult(
                                 frame_id=frame_idx,
                                 time_sec=frame_time,
+                                bbox=bbox_tuple,
+                                confidence=float(conf),
                                 track_id=int(track_id),
-                                keypoints=keypoints_payload,
-                                confidence=avg_conf,
+                                embedding=embedding_vec,
+                            )
+                        )
+                        if kp_xy is not None:
+                            confidences = kp_conf or []
+                            valid_scores = [score for score in confidences if score is not None]
+                            avg_conf = (
+                                float(sum(valid_scores) / len(valid_scores)) if valid_scores else float(conf)
+                            )
+                            padded_conf = confidences if confidences else [None] * len(kp_xy)
+                            keypoints_payload: list[dict[str, float]] = []
+                            for idx_point, point in enumerate(kp_xy):
+                                entry: dict[str, float] = {"x": float(point[0]), "y": float(point[1])}
+                                score = padded_conf[idx_point] if idx_point < len(padded_conf) else None
+                                if score is not None:
+                                    entry["confidence"] = float(score)
+                                keypoints_payload.append(entry)
+                            poses.append(
+                                PoseResult(
+                                    frame_id=frame_idx,
+                                    time_sec=frame_time,
+                                    track_id=int(track_id),
+                                    keypoints=keypoints_payload,
+                                    confidence=avg_conf,
+                                )
+                            )
+                    elif enable_train and cls_int == 6:
+                        if conf < self.settings.train_detection_conf:
+                            continue
+                        number = None
+                        number_conf = None
+                        if frame_img is not None:
+                            number, number_conf = self._extract_train_number(frame_img, bbox_tuple)
+                        trains.append(
+                            TrainDetectionResult(
+                                frame_id=frame_idx,
+                                time_sec=frame_time,
+                                bbox=bbox_tuple,
+                                confidence=float(conf),
+                                track_id=int(track_id) if track_id is not None else -1,
+                                number=number,
+                                number_confidence=number_conf,
                             )
                         )
                 frame_idx += 1
 
         except Exception as exc:
             LOGGER.error("Detection failed: %s", exc, exc_info=True)
-            return [], []
+            return [], [], []
 
         LOGGER.info(
-            "Detection complete: %s frames processed, %s tracks, %s pose entries",
+            "Detection complete: %s frames processed, %s person tracks, %s pose entries, %s trains",
             frame_idx,
             len(detections),
             len(poses),
+            len(trains),
         )
-        return detections, poses
+        return detections, poses, trains
 
     def _group_detections_by_track(
         self, detections: Sequence[DetectionResult]
@@ -713,6 +770,7 @@ class VideoProcessor:
         source: Path,
         video_id: int,
         detections: Sequence[DetectionResult],
+        train_detections: Sequence[TrainDetectionResult] | None,
         fps: float,
     ) -> Path | None:
         """Собрать отдельное видео с разметкой боксов."""
@@ -788,6 +846,9 @@ class VideoProcessor:
         frame_map: dict[int, list[DetectionResult]] = defaultdict(list)
         for det in detections:
             frame_map[det.frame_id].append(det)
+        train_map: dict[int, list[TrainDetectionResult]] = defaultdict(list)
+        for train in train_detections or []:
+            train_map[train.frame_id].append(train)
 
         frame_idx = 0
         try:
@@ -825,6 +886,26 @@ class VideoProcessor:
                         2,
                         lineType=cv2.LINE_AA,
                     )
+                for train in train_map.get(frame_idx, []):
+                    tx1, ty1, tx2, ty2 = train.bbox
+                    tx1 = int(tx1 * ratio_x)
+                    tx2 = int(tx2 * ratio_x)
+                    ty1 = int(ty1 * ratio_y)
+                    ty2 = int(ty2 * ratio_y)
+                    cv2.rectangle(annotated, (tx1, ty1), (tx2, ty2), (0, 0, 255), 3)
+                    train_label = f"Train {train.track_id}"
+                    if train.number:
+                        train_label += f" #{train.number}"
+                    cv2.putText(
+                        annotated,
+                        train_label,
+                        (tx1, max(ty1 - 10, 0)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 255),
+                        2,
+                        lineType=cv2.LINE_AA,
+                    )
                 if proc.stdin:
                     proc.stdin.write(annotated.tobytes())
                 frame_idx += 1
@@ -843,19 +924,40 @@ class VideoProcessor:
         value = (track_id * 37) % 255
         return (value, (value * 2) % 255, (value * 3) % 255)
 
-    def _ensure_reid_model(self) -> torch.nn.Module | None:
+    def _ensure_reid_model(self) -> Any | None:
         if not getattr(self.settings, "reid_enabled", True):
             return None
         if self._reid_model is None:
+            if FeatureExtractor is not None:
+                try:
+                    model_name = getattr(self.settings, "reid_model_name", "osnet_x1_0")
+                    model_path = getattr(self.settings, "reid_model_path", None)
+                    device = "cuda" if self._reid_device.type == "cuda" else "cpu"
+                    self._reid_model = FeatureExtractor(
+                        model_name=model_name,
+                        model_path=model_path,
+                        device=device,
+                    )
+                    self._reid_uses_torchreid = True
+                    LOGGER.info("Torchreid FeatureExtractor loaded: %s on %s", model_name, device)
+                    return self._reid_model
+                except Exception as exc:  # pragma: no cover - optional dependency
+                    LOGGER.warning(
+                        "Failed to initialize Torchreid extractor (%s): %s. Falling back to torchvision.",
+                        getattr(self.settings, "reid_model_name", "osnet_x1_0"),
+                        exc,
+                    )
+                    self._reid_model = None
             try:
                 model = resnet18(weights=ResNet18_Weights.DEFAULT)
             except Exception as exc:  # pragma: no cover
-                LOGGER.warning("Failed to load ReID backbone: %s", exc)
+                LOGGER.warning("Failed to load torchvision ReID fallback: %s", exc)
                 return None
             model.fc = torch.nn.Identity()
             model.eval()
             model.to(self._reid_device)
             self._reid_model = model
+            self._reid_uses_torchreid = False
         return self._reid_model
 
     def _extract_embedding(
@@ -877,8 +979,93 @@ class VideoProcessor:
         crop = frame[y1:y2, x1:x2]
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb)
+        if self._reid_uses_torchreid and FeatureExtractor is not None:
+            try:
+                features = model([pil_img])
+            except Exception as exc:  # pragma: no cover - runtime issue
+                LOGGER.debug("Torchreid inference failed: %s", exc)
+                return None
+            if isinstance(features, torch.Tensor):
+                vec = features[0]
+            else:
+                vec = torch.tensor(features[0])
+            vec = F.normalize(vec, dim=0)
+            return vec.cpu().tolist()
+
         tensor = self._reid_transform(pil_img).unsqueeze(0).to(self._reid_device)
         with torch.no_grad():
             emb = model(tensor)
             emb = F.normalize(emb, dim=1)
         return emb.squeeze(0).cpu().tolist()
+
+    def _ensure_train_reader(self):
+        if easyocr is None:
+            return None
+        if self._train_ocr_reader is None:
+            try:
+                langs = getattr(self.settings, "train_number_langs", ["en"])
+                use_gpu = torch.cuda.is_available()
+                self._train_ocr_reader = easyocr.Reader(langs, gpu=use_gpu)
+            except Exception as exc:  # pragma: no cover - optional dependency
+                LOGGER.warning("Failed to initialize EasyOCR reader: %s", exc)
+                self._train_ocr_reader = None
+        return self._train_ocr_reader
+
+    def _extract_train_number(
+        self, frame: np.ndarray, bbox: tuple[int, int, int, int]
+    ) -> tuple[str | None, float | None]:
+        reader = self._ensure_train_reader()
+        if reader is None:
+            return None, None
+        x1, y1, x2, y2 = bbox
+        h, w = frame.shape[:2]
+        x1 = max(0, min(w - 1, x1))
+        x2 = max(0, min(w, x2))
+        y1 = max(0, min(h - 1, y1))
+        y2 = max(0, min(h, y2))
+        if x2 - x1 < 20 or y2 - y1 < 20:
+            return None, None
+
+        crop = frame[y1:y2, x1:x2]
+        roi_height = max(5, int((y2 - y1) * 0.45))
+        roi = crop[:roi_height, :]
+        results = reader.readtext(roi)
+        best_text = None
+        best_conf = 0.0
+        min_len = getattr(self.settings, "train_number_min_length", 3)
+        for _, text, conf in results:
+            cleaned = re.sub(r"[^0-9A-Z]", "", text.upper())
+            if len(cleaned) < min_len:
+                continue
+            if conf > best_conf:
+                best_conf = float(conf)
+                best_text = cleaned
+        return best_text, (best_conf if best_text else None)
+
+    def _store_train_events(
+        self, video_path: Path, video_id: int, detections: Sequence[TrainDetectionResult]
+    ) -> None:
+        output_dir = getattr(self.settings, "train_event_output_dir", Path("runs/train_events"))
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            LOGGER.warning("Failed to create train event dir %s: %s", output_dir, exc)
+            return
+        payload = [
+            {
+                "frame_id": det.frame_id,
+                "time_sec": det.time_sec,
+                "bbox": det.bbox,
+                "confidence": det.confidence,
+                "track_id": det.track_id,
+                "number": det.number,
+                "number_confidence": det.number_confidence,
+            }
+            for det in detections
+        ]
+        out_path = output_dir / f"{video_id}_{video_path.stem}_trains.json"
+        try:
+            out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            LOGGER.info("Stored %s train detections at %s", len(detections), out_path)
+        except OSError as exc:
+            LOGGER.warning("Failed to write train detections: %s", exc)

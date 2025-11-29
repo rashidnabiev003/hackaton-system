@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     )
     # Опциональные пути к весам: оставляем None, чтобы брать значения по умолчанию из Ultralytics.
     detection_model_path: str | None = Field(
-        default="./yolo11n.pt", description="./yolo11n.pt"
+        default="./yolo12m.pt", description="./yolo11n.pt"
     )
     enable_pose_capture: bool = Field(
         default=True,
@@ -97,6 +97,26 @@ class Settings(BaseSettings):
     patch_nms_threshold: float = Field(
         default=0.25,
         description="Patch-based NMS threshold when combining detections.",
+    )
+    enable_train_detection: bool = Field(
+        default=True,
+        description="Detect approaching trains (COCO class 6) and read their numbers.",
+    )
+    train_detection_conf: float = Field(
+        default=0.45,
+        description="Confidence threshold for train bounding boxes.",
+    )
+    train_number_langs: list[str] = Field(
+        default_factory=lambda: ["en", "ru"],
+        description="Languages passed to OCR reader for train numbers.",
+    )
+    train_number_min_length: int = Field(
+        default=3,
+        description="Minimum number of characters for accepted train identifiers.",
+    )
+    train_event_output_dir: Path = Field(
+        default=Path("runs/train_events"),
+        description="Folder for JSON reports with detected train numbers.",
     )
     reid_enabled: bool = Field(
         default=True, description="Enable ReID-assisted track stitching."
