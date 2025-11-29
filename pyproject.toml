@@ -20,7 +20,7 @@ dependencies = [
     "sqlalchemy>=2.0",
     "streamlit>=1.39",
     "supervision>=0.21",
-    "torchreid>=1.4.0",
+    "torchreid>=0.2.5",
     "typer>=0.12",
     "ultralytics>=8.3",
 ]

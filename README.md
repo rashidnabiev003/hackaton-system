@@ -105,6 +105,9 @@ pose_keypoints(id, video_id, person_id, frame_id, time_sec, keypoints, pose_conf
   - `python main.py setup-database` – создать таблицы.
   - `python main.py seed-demo` – заполнить демонстрационными данными (флаг `--force` перезаписывает).
   - `python main.py process-video path/to/video.mp4` – запускает обработку (детекции пока заглушены).
+- Real-time / low-latency:
+  - Используйте патчевый инференс (`HACKATON_USE_PATCH_INFERENCE=true`) + ByteTrack (параметры `HACKATON_TRACKER_TRACK_BUFFER`, `HACKATON_TRACKER_MATCH_THRESHOLD`).
+  - На входе можно давать потоковое видеофайл/rtsp — ffmpeg-превью собирается через `HACKATON_PREVIEW_FFMPEG_PATH` (по умолчанию `ffmpeg` из PATH).
 - Бэкенд:
   - `hackaton_system/config.py` – настройки (DB URL, пути к весам).
   - `hackaton_system/db/` – SQLAlchemy модели, сессии, сидер демо-данных.

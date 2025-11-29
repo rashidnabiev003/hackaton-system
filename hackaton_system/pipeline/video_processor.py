@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict
+import os
 import json
 import math
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ import subprocess
 from typing import Any, Iterable, List, Mapping, Protocol, Sequence, cast
 
 import cv2
+from patched_yolo_infer import CombineDetections, MakeCropsDetectThem
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -19,6 +21,7 @@ from PIL import Image
 from sqlalchemy.orm import Session
 from torchvision import transforms
 from torchvision.models import ResNet18_Weights, resnet18
+import supervision as sv
 
 try:  # torchreid is optional; fall back to torchvision if missing
     from torchreid.utils import FeatureExtractor  # type: ignore[attr-defined]
@@ -130,8 +133,52 @@ class VideoProcessor:
             ]
         )
         self._train_ocr_reader: Any | None = None
+        self._ensure_cache_dirs()
         # При создании процессора убеждаемся, что схема БД готова принимать данные.
         init_db()
+
+    def _preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Lightweight denoise/contrast/gamma preprocessing for noisy footage."""
+
+        if not getattr(self.settings, "preprocess_enable", False):
+            return frame
+
+        processed = frame
+        h = int(getattr(self.settings, "preprocess_denoise_h", 0))
+        if h > 0:
+            processed = cv2.fastNlMeansDenoisingColored(processed, None, h, h, 7, 21)
+        alpha = float(getattr(self.settings, "preprocess_contrast_alpha", 1.0))
+        beta = float(getattr(self.settings, "preprocess_brightness_beta", 0.0))
+        if alpha != 1.0 or beta != 0.0:
+            processed = cv2.convertScaleAbs(processed, alpha=alpha, beta=beta)
+        gamma = float(getattr(self.settings, "preprocess_gamma", 1.0))
+        if gamma != 1.0 and gamma > 0:
+            inv_gamma = 1.0 / gamma
+            table = np.array([(i / 255.0) ** inv_gamma * 255 for i in range(256)]).astype(
+                "uint8"
+            )
+            processed = cv2.LUT(processed, table)
+        return processed
+
+    def _ensure_cache_dirs(self) -> None:
+        """Ensure local cache directories exist for weights and OCR downloads."""
+
+        cache_map = [
+            ("ultralytics_config_dir", "ULTRALYTICS_CONFIG_DIR"),
+            ("torch_home", "TORCH_HOME"),
+            ("easyocr_module_path", "EASYOCR_MODULE_PATH"),
+        ]
+        for attr, env_name in cache_map:
+            value = getattr(self.settings, attr, None)
+            path_str = str(value) if value else os.environ.get(env_name)
+            if value:
+                os.environ[env_name] = str(value)
+            if not path_str:
+                continue
+            try:
+                Path(path_str).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                LOGGER.warning("Cannot create cache dir for %s at %s", env_name, path_str)
 
     def process_video(self, video_path: str | Path) -> int:
         """Process a single video file and persist metadata.
@@ -267,6 +314,9 @@ class VideoProcessor:
     ) -> tuple[list[DetectionResult], list[PoseResult], list[TrainDetectionResult]]:
         """????????? ???????? + ??????? ????? Ultralytics YOLO."""
 
+        if getattr(self.settings, "use_patch_inference", False):
+            return self._run_detection_patch(video_path, fps)
+
         model: DetectorProtocol = self._load_detector()
         detections: list[DetectionResult] = []
         poses: list[PoseResult] = []
@@ -292,6 +342,7 @@ class VideoProcessor:
                 conf=tracker_conf,
                 iou=self.settings.detection_iou,
                 imgsz=self.settings.detection_imgsz,
+                augment=bool(getattr(self.settings, "detection_tta", False)),
             )
             for result in results_stream:
                 boxes: Any = getattr(result, "boxes", None)
@@ -441,6 +492,134 @@ class VideoProcessor:
             frame_idx,
             len(detections),
             len(poses),
+            len(trains),
+        )
+        return detections, poses, trains
+
+    def _run_detection_patch(
+        self, video_path: Path, fps: float
+    ) -> tuple[list[DetectionResult], list[PoseResult], list[TrainDetectionResult]]:
+        """Patch-based detection + ByteTrack tracking using patched_yolo_infer."""
+
+        model: DetectorProtocol = self._load_detector()
+        detections: list[DetectionResult] = []
+        trains: list[TrainDetectionResult] = []
+        poses: list[PoseResult] = []  # pose не поддерживается в патчевом режиме
+
+        enable_train = bool(getattr(self.settings, "enable_train_detection", False))
+        track_classes = [0, 6] if enable_train else [0]
+        tracker_conf = (
+            min(self.settings.detection_conf, self.settings.train_detection_conf)
+            if enable_train
+            else self.settings.detection_conf
+        )
+
+        tracker = sv.ByteTrack(
+            track_activation_threshold=tracker_conf,
+            lost_track_buffer=getattr(self.settings, "tracker_track_buffer", 60),
+            minimum_matching_threshold=getattr(self.settings, "tracker_match_threshold", 0.8),
+            frame_rate=int(round(fps or 30)),
+            minimum_consecutive_frames=1,
+        )
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video {video_path}")
+
+        frame_idx = 0
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame = self._preprocess_frame(frame)
+                frame_time = frame_idx / fps if fps else frame_idx
+                patcher = MakeCropsDetectThem(
+                    image=frame,
+                    model=model,
+                    imgsz=self.settings.detection_imgsz,
+                    conf=tracker_conf,
+                    iou=self.settings.detection_iou,
+                    classes_list=track_classes,
+                    shape_x=self.settings.patch_shape_x,
+                    shape_y=self.settings.patch_shape_y,
+                    overlap_x=self.settings.patch_overlap_x,
+                    overlap_y=self.settings.patch_overlap_y,
+                    resize_initial_size=True,
+                    inference_extra_args={"augment": bool(getattr(self.settings, "detection_tta", False))},
+                )
+                combiner = CombineDetections(
+                    patcher,
+                    nms_threshold=self.settings.patch_nms_threshold,
+                    match_metric="IOU",
+                    class_agnostic_nms=True,
+                )
+
+                person_boxes: list[list[float]] = []
+                person_confidences: list[float] = []
+                for bbox, conf, cls_id in zip(
+                    combiner.filtered_boxes,
+                    combiner.filtered_confidences,
+                    combiner.filtered_classes_id,
+                ):
+                    cls_int = int(cls_id)
+                    if cls_int == 0:
+                        person_boxes.append(bbox)
+                        person_confidences.append(float(conf))
+                    elif enable_train and cls_int == 6 and conf >= self.settings.train_detection_conf:
+                        number = None
+                        number_conf = None
+                        try:
+                            number, number_conf = self._extract_train_number(frame, tuple(int(c) for c in bbox))
+                        except Exception:
+                            number = None
+                            number_conf = None
+                        trains.append(
+                            TrainDetectionResult(
+                                frame_id=frame_idx,
+                                time_sec=frame_time,
+                                bbox=tuple(int(c) for c in bbox),
+                                confidence=float(conf),
+                                track_id=-1,
+                                number=number,
+                                number_confidence=number_conf,
+                            )
+                        )
+
+                if person_boxes:
+                    dets = sv.Detections(
+                        xyxy=np.array(person_boxes, dtype=np.float32),
+                        confidence=np.array(person_confidences, dtype=np.float32),
+                    )
+                    tracked = tracker.update_with_detections(dets)
+                    for xyxy, conf, tid in zip(
+                        tracked.xyxy, tracked.confidence, tracked.tracker_id
+                    ):
+                        if tid is None or int(tid) < 0:
+                            continue
+                        detections.append(
+                            DetectionResult(
+                                frame_id=frame_idx,
+                                time_sec=frame_time,
+                                bbox=tuple(int(coord) for coord in xyxy),
+                                confidence=float(conf),
+                                track_id=int(tid),
+                            )
+                        )
+                else:
+                    tracker.update_with_detections(sv.Detections.empty())
+
+                frame_idx += 1
+        except Exception as exc:
+            LOGGER.error("Patch-based detection failed: %s", exc, exc_info=True)
+            return [], [], []
+        finally:
+            cap.release()
+
+        LOGGER.info(
+            "Patch detection complete: %s frames processed, %s person detections, %s trains",
+            frame_idx,
+            len(detections),
             len(trains),
         )
         return detections, poses, trains
@@ -1027,9 +1206,20 @@ class VideoProcessor:
             return None, None
 
         crop = frame[y1:y2, x1:x2]
-        roi_height = max(5, int((y2 - y1) * 0.45))
+        roi_height = max(5, int((y2 - y1) * 0.65))
         roi = crop[:roi_height, :]
-        results = reader.readtext(roi)
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        norm = clahe.apply(gray)
+        target_h = 180
+        if norm.shape[0] < target_h:
+            scale = target_h / norm.shape[0]
+            norm = cv2.resize(norm, (int(norm.shape[1] * scale), target_h))
+        _, thresh = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        results = reader.readtext(
+            thresh,
+            allowlist="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        )
         best_text = None
         best_conf = 0.0
         min_len = getattr(self.settings, "train_number_min_length", 3)

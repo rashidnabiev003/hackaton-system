@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,8 +33,7 @@ class Settings(BaseSettings):
 
     # URL подключения к БД; по умолчанию используем локальный SQLite в каталоге data.
     database_url: str = Field(
-        # default="sqlite:///data/hackaton.db",
-        default="sqlite:///C:/Users/SKade/Documents/VScode/Hackaton/BD/Hackaton_db.db",
+        default="sqlite:///data/hackaton.db",
         description="SQLAlchemy-compatible database URL.",
     )
     # Путь к каталогу с данными — через него создаём директории при инициализации БД.
@@ -42,9 +41,26 @@ class Settings(BaseSettings):
         default=Path("data"),
         description="Directory for processed artifacts and SQLite database.",
     )
+    ultralytics_config_dir: Path | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "HACKATON_ULTRALYTICS_CONFIG_DIR", "ULTRALYTICS_CONFIG_DIR"
+        ),
+        description="Cache dir for Ultralytics settings/models.",
+    )
+    torch_home: Path | None = Field(
+        default=None,
+        validation_alias=AliasChoices("HACKATON_TORCH_HOME", "TORCH_HOME"),
+        description="Cache dir for Torch hub/downloads.",
+    )
+    easyocr_module_path: Path | None = Field(
+        default=None,
+        validation_alias=AliasChoices("HACKATON_EASYOCR_MODULE_PATH", "EASYOCR_MODULE_PATH"),
+        description="Local directory for EasyOCR models.",
+    )
     # Опциональные пути к весам: оставляем None, чтобы брать значения по умолчанию из Ultralytics.
     detection_model_path: str | None = Field(
-        default="./yolo12m.pt", description="./yolo11n.pt"
+        default="./yolo11x.pt", description="./yolo11n.pt"
     )
     enable_pose_capture: bool = Field(
         default=True,
@@ -63,7 +79,7 @@ class Settings(BaseSettings):
         description="Write every N-th frame to preview to reduce size (1 = every frame).",
     )
     preview_ffmpeg_path: str | None = Field(
-        default="C:/Users/SKade/AppData/Roaming/ffmpeg/bin/ffmpeg.exe",
+        default="ffmpeg",
         description="Path to ffmpeg binary (if None, assumes ffmpeg available in PATH).",
     )
     preview_draw_poses: bool = Field(
@@ -73,6 +89,26 @@ class Settings(BaseSettings):
     pose_conf_threshold: float = Field(
         default=0.2,
         description="Minimum pose keypoint confidence for visualization and analytics.",
+    )
+    preprocess_enable: bool = Field(
+        default=False,
+        description="Apply denoise/contrast/gamma preprocessing before detection.",
+    )
+    preprocess_denoise_h: int = Field(
+        default=0,
+        description="Strength for fastNlMeansDenoisingColored (0 disables).",
+    )
+    preprocess_contrast_alpha: float = Field(
+        default=1.15,
+        description="Contrast gain factor (1.0 = no change).",
+    )
+    preprocess_brightness_beta: float = Field(
+        default=5.0,
+        description="Brightness shift added after contrast.",
+    )
+    preprocess_gamma: float = Field(
+        default=1.05,
+        description="Gamma correction (1.0 = no change).",
     )
     use_patch_inference: bool = Field(
         default=False,
@@ -98,6 +134,14 @@ class Settings(BaseSettings):
         default=0.25,
         description="Patch-based NMS threshold when combining detections.",
     )
+    tracker_track_buffer: int = Field(
+        default=60,
+        description="Number of frames to keep lost tracks in ByteTrack-like logic.",
+    )
+    tracker_match_threshold: float = Field(
+        default=0.8,
+        description="Matching threshold for tracker associations.",
+    )
     enable_train_detection: bool = Field(
         default=True,
         description="Detect approaching trains (COCO class 6) and read their numbers.",
@@ -122,10 +166,10 @@ class Settings(BaseSettings):
         default=True, description="Enable ReID-assisted track stitching."
     )
     reid_similarity_threshold: float = Field(
-        default=0.7, description="Cosine similarity threshold for merging tracks."
+        default=0.8, description="Cosine similarity threshold for merging tracks."
     )
     reid_time_gap_sec: float = Field(
-        default=2.2,
+        default=1.5,
         description="Maximum time gap (sec) between tracks considered for stitching.",
     )
     reid_model_name: str = Field(
@@ -143,13 +187,17 @@ class Settings(BaseSettings):
         description="Tracker configuration name/path for Ultralytics track API.",
     )
     detection_conf: float = Field(
-        default=0.4, description="Confidence threshold for YOLO detections."
+        default=0.25, description="Confidence threshold for YOLO detections."
     )
     detection_iou: float = Field(
-        default=0.5, description="IoU threshold for YOLO tracker associations."
+        default=0.6, description="IoU threshold for YOLO tracker associations."
     )
     detection_imgsz: int = Field(
         default=1280, description="Image size (short side) passed to YOLO track."
+    )
+    detection_tta: bool = Field(
+        default=False,
+        description="Enable light test-time augmentation during detection.",
     )
     activity_model_path: str | None = Field(
         default="./yolo11n-pose.pt", description="Path to the action recognition weights."
